@@ -1,0 +1,24 @@
+{
+  "name": "restep-cli",
+  "version": "0.1.0",
+  "description": "CLI genérica para cualquier API Restep 1, guiada por su documento de descubrimiento",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "restep": "restep.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/restep-spec/restep-cli.git"
+  },
+  "homepage": "https://restep.wubytes.com/tools/",
+  "bugs": {
+    "url": "https://github.com/restep-spec/restep-cli/issues"
+  },
+  "scripts": {
+    "test": "node test.mjs"
+  }
+}
