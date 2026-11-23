@@ -41,6 +41,38 @@ if (process.argv[2] === '--mock') {
       res.end(data === undefined ? undefined : JSON.stringify(data));
     };
     const echo = { method: req.method, url: req.url, key: req.headers['idempotency-key'] ?? null, body: body ? JSON.parse(body) : null };
+    // Borrador 6: raíces con descubrimientos que la referencia no tiene (§1.1, §1.2, §4.2, §5.1, §5.9, §7.1).
+    const d6 = {
+      restep: '1.0-draft.6', profiles: ['core', 'query', 'writes'], extensions: ['actions', 'inherit'], idempotency: { ttl: 86400, anonymous: false },
+      collections: {
+        things: {
+          path: '/things', methods: ['GET', 'POST'], id_from: 'derived',
+          filter: { size: { type: 'shape', ops: ['eq'] }, name: { type: 'string', ops: ['eq', 'regex'] } },
+          named_filters: { odd: { type: 'polygon', description: 'Tipo desconocido.' } },
+          actions: { zap: { on: 'universe', safe: false, idempotent: false }, peek: { on: 'item', safe: true, idempotent: true, method: 'QUERY' } },
+          inherit: { rate: { own: 'rate_own', from: [], default: true } },
+        },
+        pages: { path: '/pages' },
+      },
+      singletons: { prefs: { path: '/prefs', methods: ['GET', 'PATCH'], description: 'Preferencias.' }, tpl: { path: '/u/{id}/prefs' }, kid: { path: '/kid', parent: 'things' } },
+    };
+    const roots = {
+      '/v2/': { restep: '2.0', collections: { books: { path: '/books' } } },
+      '/rara/': { restep: 'uno', collections: { books: { path: '/books' } } },
+      '/d6/': d6,
+      '/sinext/': { restep: '1.0-draft.6', profiles: ['core'], collections: { books: { path: '/books', actions: { reserve: { on: 'item', safe: false, idempotent: false } } } } },
+      '/d7/': { ...d6, restep: '1.0-draft.7' },
+    };
+    if (req.url === '/xo/') {
+      res.writeHead(200, { 'content-type': 'text/html', link: '<http://127.0.0.1:8852/xo-desc>; rel="service-desc"' });
+      return res.end('<h1>Otra</h1>');
+    }
+    if (req.url === '/xo-desc') return send(200, { ...d6, 'x-auth': req.headers.authorization ?? null, 'x-cookie': req.headers.cookie ?? null }, { 'cache-control': 'no-store' });
+    if (Object.hasOwn(roots, req.url)) return send(200, roots[req.url], { 'cache-control': 'no-store' });
+    if (req.url === '/d6/things' && req.method === 'POST') return send(201, { id: 'x', echo });
+    if (req.url.startsWith('/d6/things')) return send(200, { items: [], next: null, echo });
+    if (req.url === '/d6/prefs') return send(200, { theme: 'dark', echo });
+    if (req.url === '/d6/pages') return send(200, { items: [{ id: '1' }], next: 'ftp://localhost:8852/d6/pages?cursor=2' });
     if (req.url === '/') {
       res.writeHead(200, { 'content-type': 'text/html', link: '</openapi.json>; rel="service-desc", </restep.json>; rel="service-desc"; type="application/json"' });
       return res.end('<h1>Tienda</h1>');
@@ -114,6 +146,10 @@ async function main() {
       ok(r);
       check(/books/.test(r.stdout) && /categories/.test(r.stdout) && /core, query, writes/.test(r.stdout), 'faltan colecciones o perfiles', r);
     });
+    await test('--help nombra get y update de un recurso suelto y describe de un recurso (§5.9)', async () => {
+      const r = await run(['--help']);
+      ok(r); check(/describe \[colección\|recurso\]/.test(r.stdout) && /get <recurso>/.test(r.stdout) && /update <recurso> --data/.test(r.stdout), 'la ayuda no los nombra', r);
+    });
     await test('sin orden, describe', async () => {
       const r = await run([REF]);
       ok(r); check(/products/.test(r.stdout), 'no describe', r);
@@ -157,6 +193,18 @@ async function main() {
       const n = await run([REF, 'get', 'books', '-f', 'category!=novela-negra']);
       ok(n); check(n.json().items.length === 4, 'ne no filtra', n);
     });
+    await test('filtros con nombre: -f nombre y -f nombre=valor (§6.1)', async () => {
+      const r = await run([REF, 'get', 'books', '-f', 'featured', '-f', 'price<=15']);
+      ok(r); check(r.json().items.map((i) => i.id).join() === '30', 'featured y price<=15 no dan 30', r);
+      const s = await run([REF, 'get', 'books', '-f', 'search=NIEBLA', '-s', 'id']);
+      ok(s); check(s.json().items.map((i) => i.id).join() === '50,7', 'search no filtra', s);
+      const v = await run([REF, 'get', 'books', '-f', 'featured=sí']);
+      exit(v, 3); check(/es un interruptor: no lleva valor/.test(v.stderr), 'interruptor con valor sin error local', v);
+      const o = await run([REF, 'get', 'books', '-f', 'search[eq]=x']);
+      exit(o, 3); check(/es un filtro con nombre: no lleva operador/.test(o.stderr), 'operador sin error local', o);
+      const d = await run([REF, 'describe', 'books']);
+      ok(d); check(/Filtros con nombre/.test(d.stdout) && /featured/.test(d.stdout), 'describe no los muestra', d);
+    });
     await test('filtro inexistente: error local con sugerencia', async () => {
       const r = await run([REF, 'get', 'books', '-f', 'categry=poesia']);
       exit(r, 3); check(/¿Quisiste decir «category»\?/.test(r.stderr) && /--raw/.test(r.stderr), 'sin sugerencia', r);
@@ -182,8 +230,10 @@ async function main() {
       exit(d, 3); check(/true o false/.test(d.stderr), 'null', d);
       const e = await run([REF, 'get', 'books', '-f', 'price=1', '-f', 'price[eq]=2']);
       exit(e, 3); check(/dos veces/.test(e.stderr), 'repetido', e);
-      const f = await run([REF, 'get', 'books', '-f', 'price']);
-      exit(f, 2);
+      const f = await run([REF, 'get', 'books', '-f', 'price']); // solo un nombre es un interruptor (§6.1); price no lo es
+      exit(f, 3); check(/filtra un campo y necesita un valor/.test(f.stderr), 'campo sin valor', f);
+      const g = await run([REF, 'get', 'books', '-f', 'price<']);
+      exit(g, 3);
     });
     await test('--sort y orden inexistente', async () => {
       const r = await run([REF, 'get', 'books', '--sort', '-price']);
@@ -193,7 +243,7 @@ async function main() {
     });
     await test('--fields en lista y en elemento; campo inexistente', async () => {
       const r = await run([REF, 'get', 'books', '--fields', 'title,price']);
-      ok(r); check(Object.keys(r.json().items[0]).sort().join() === 'id,price,title', 'campos', r);
+      ok(r); check(Object.keys(r.json().items[0]).sort().join() === '_etag,id,price,title', 'campos (más _etag, §7.2)', r);
       const i = await run([REF, 'get', 'books', '7', '--fields', 'title']);
       ok(i); check(i.json().title && !i.json().price && i.json()._etag, 'campos del elemento', i);
       const e = await run([REF, 'get', 'books', '--fields', 'titel']);
@@ -372,8 +422,11 @@ async function main() {
       exit(b, 3); check(/¿Quisiste decir «cancel»\?/.test(b.stderr), 'sugerencia', b);
       const c = await run([MOCK, 'action', 'orders', 'cancel']);
       exit(c, 2); check(/acción de elemento/.test(c.stderr), 'on', c);
-      const d = await run([REF, 'action', 'books', '7', 'reserve']);
+      // La referencia anuncia ya actions: la API sin la extensión es una raíz del simulado.
+      const d = await run([`${MOCK}/sinext/`, 'action', 'books', '7', 'reserve']);
       exit(d, 3); check(/extensión actions/.test(d.stderr), 'sin extensión', d);
+      const u = await run([REF, 'action', 'books', '7', 'reserve']);
+      exit(u, 3); check(/no tiene la acción «reserve»/.test(u.stderr), 'acción no declarada en la referencia', u);
     });
     await test('acción de colección (idempotente, sin clave) y acción GET', async () => {
       const a = await run([MOCK, 'action', 'orders', 'import', '-v']);
@@ -402,8 +455,147 @@ async function main() {
       exit(b, 2); check(/--filter/.test(b.stderr), 'sugerencia', b);
     });
 
-    console.log('autocompletado');
     const comp = async (...words) => (await run(['__complete', '--', ...words])).stdout.trim().split('\n');
+    console.log('relaciones, subcolecciones y acciones contra la referencia');
+    await test('subcolección reviews con su padre: 404 sin padre, se borra con el libro', async () => {
+      const r = await run([REF, 'get', 'reviews', '--parent', '7', '-o', 'json']);
+      ok(r); check(r.json().items.length >= 1 && r.json().items.every((x) => x._etag), 'reseñas del libro 7', r);
+      const n = await run([REF, 'get', 'reviews', '--parent', 'no-existe', '-o', 'json']);
+      check(n.code !== 0 && /not_found|404/.test(n.stderr + n.stdout), 'el padre no existe', n);
+      const b = await run([REF, 'create', 'books', '-d', '{"title":"Con reseña","price":"3.00","category":"poesia"}', '-o', 'json']);
+      ok(b); const bookId = JSON.parse(b.stdout).id;
+      const c = await run([REF, 'create', 'reviews', '--parent', bookId, '-d', '{"rating":4,"text":"Corta."}', '-o', 'json']);
+      ok(c); const revId = JSON.parse(c.stdout).id;
+      ok(await run([REF, 'get', 'reviews', revId, '--parent', bookId, '-o', 'json']));
+      ok(await run([REF, 'delete', 'books', bookId]));
+      const g = await run([REF, 'get', 'reviews', revId, '--parent', bookId, '-o', 'json']);
+      check(g.code !== 0, 'la reseña se borra con el libro', g);
+    });
+    await test('--include: profundidad 2, relación con href y polimórfica con type', async () => {
+      const a = await run([REF, 'get', 'products', '--include', 'category.parent', '-o', 'json']);
+      ok(a); check(a.json().items.some((p) => p.category?.parent?.name), 'category.parent incluido', a);
+      const deep = await run([REF, 'get', 'products', '--include', 'category.parent.parent']);
+      exit(deep, 3); check(/profundidad/.test(deep.stderr), 'pasa de include_depth', deep);
+      const h = await run([REF, 'get', 'books', '7', '-i', 'highlight', '-o', 'json']);
+      ok(h); const hl = h.json().highlight;
+      check(hl?.href === `/books/7/reviews/${hl?.id}` && typeof hl.text === 'string', 'highlight con href', h);
+      const f = await run([REF, 'get', 'reviews', hl.id, '--parent', '7', '-o', 'json']);
+      ok(f); check(f.json().text === hl.text, 'el href lleva a la reseña', f);
+      const p = await run([REF, 'get', 'categories', '--include', 'showcase', '-o', 'json']);
+      ok(p); const shown = p.json().items.map((c) => c.showcase).filter(Boolean);
+      check(shown.length && shown.every((x) => ['books', 'products'].includes(x.type)), 'showcase con type', p);
+      const bad = await run([REF, 'get', 'categories', '--include', 'showcase.author']);
+      exit(bad, 3); check(/profundidad/.test(bad.stderr), 'categories no declara include_depth: 1', bad);
+      const no = await run([REF, 'get', 'books', '--include', 'editor']);
+      exit(no, 3); check(/no es una relación/.test(no.stderr), 'relación no declarada', no);
+      const sg = await run([REF, 'get', 'shop', '--include', 'x']);
+      exit(sg, 3); check(/recurso suelto/.test(sg.stderr), 'include en un recurso suelto', sg);
+    });
+    await test('acciones de la referencia: GET de colección, POST con input, idempotentes', async () => {
+      const low = await run([REF, 'action', 'products', 'low_stock', '-o', 'json']);
+      ok(low); check(low.json().items.every((x) => x.stock < 5), 'low_stock', low);
+      const before = (await run([REF, 'get', 'products', '2', '-o', 'json'])).json().stock;
+      const r = await run([REF, 'action', 'products', '2', 'restock', '-d', '{"quantity":2}', '-o', 'json']);
+      ok(r); check(r.json().stock === before + 2, 'restock suma', r);
+      const v = await run([REF, 'action', 'products', '2', 'restock', '-d', '{"quantity":0}']);
+      exit(v, 3); check(/quantity/.test(v.stderr), 'input validado en local', v);
+      const a = await run([REF, 'action', 'authors', 'find_or_create', '-d', '{"name":"Autora de la CLI"}', '-o', 'json']);
+      const b = await run([REF, 'action', 'authors', 'find_or_create', '-d', '{"name":"Autora de la CLI"}', '-o', 'json']);
+      ok(a); ok(b); check(a.json().id === b.json().id, 'find_or_create da el mismo autor', b);
+      const t = await run([REF, 'action', 'categories', '2', 'inherit_tax', '-o', 'json']);
+      ok(t); check(t.json().tax_rate_own === null, 'inherit_tax sin cuerpo', t);
+    });
+
+    console.log('borrador 6');
+    await test('recurso suelto: describe, get, --fields, update; ni create ni delete (§5.9)', async () => {
+      const d = await run([REF, 'describe']);
+      ok(d); check(/Recursos sueltos/.test(d.stdout) && /shop\s+\/shop/.test(d.stdout), 'describe no muestra shop', d);
+      const ds = await run([REF, 'describe', 'shop']);
+      ok(ds); check(/recurso suelto/.test(ds.stdout) && /Campos: name/.test(ds.stdout), 'describe shop', ds);
+      const g = await run([REF, 'get', 'shop']);
+      ok(g); check(typeof g.json().name === 'string', 'get shop', g);
+      const f = await run([REF, 'get', 'shop', '--fields', 'name']);
+      ok(f); check(f.json().name && f.json().max_reservations === undefined, 'fields en shop', f);
+      const u = await run([REF, 'update', 'shop', '-d', JSON.stringify({ name: g.json().name })]);
+      ok(u); check(u.json().name === g.json().name, 'update shop', u);
+      const i = await run([REF, 'get', 'shop', '7']);
+      exit(i, 2);
+      const c = await run([REF, 'create', 'shop', '-d', '{}']);
+      exit(c, 3); check(/recurso suelto/.test(c.stderr), 'create shop', c);
+      const x = await run([REF, 'delete', 'shop', '1']);
+      exit(x, 3);
+    });
+    await test('recursos sueltos con plantilla o parent se ignoran (§5.9)', async () => {
+      const d = await run([`${MOCK}/d6/`, 'describe']);
+      ok(d); check(/prefs/.test(d.stdout) && !/tpl/.test(d.stdout) && !/\bkid\b/.test(d.stdout), 'tpl o kid salen', d);
+      const t = await run([`${MOCK}/d6/`, 'get', 'tpl']);
+      exit(t, 3);
+      const g = await run([`${MOCK}/d6/`, 'get', 'prefs']);
+      ok(g); check(g.json().echo.url === '/d6/prefs', 'get prefs', g);
+    });
+    await test('versión: acepta el sufijo y rechaza otra mayor o una mal formada, también con --raw (§1.1)', async () => {
+      const a = await run([REF, 'describe']);
+      ok(a); check(/Restep 1\.0-draft\.6/.test(a.stdout), 'no muestra el borrador', a);
+      const b = await run([`${MOCK}/v2/`, 'get', 'books']);
+      exit(b, 1); check(/no es Restep 1/.test(b.stderr) && /otra versión mayor/.test(b.stderr), 'mayor 2', b);
+      const c = await run([`${MOCK}/v2/`, 'get', 'books', '--raw']);
+      exit(c, 1); check(!/echo/.test(c.stdout), 'con --raw cae a core', c);
+      const d = await run([`${MOCK}/rara/`, 'describe']);
+      exit(d, 1); check(/gramática/.test(d.stderr), 'mal formada', d);
+    });
+    await test('valores desconocidos: filtro, operador, filtro con nombre y acción no se usan (§4.2)', async () => {
+      const d = await run([`${MOCK}/d6/`, 'describe', 'things']);
+      ok(d); check(/tipo que esta CLI no conoce.*size/.test(d.stdout) && /Acción zap: declarada con un on/.test(d.stdout) && !/^\s+size\s+shape/m.test(d.stdout), 'describe', d);
+      const f = await run([`${MOCK}/d6/`, 'get', 'things', '-f', 'size=3']);
+      exit(f, 3);
+      const o = await run([`${MOCK}/d6/`, 'get', 'things', '-f', 'name[regex]=a']);
+      exit(o, 3);
+      const n = await run([`${MOCK}/d6/`, 'get', 'things', '-f', 'odd=x']);
+      exit(n, 3);
+      const z = await run([`${MOCK}/d6/`, 'action', 'things', 'zap']);
+      exit(z, 3); check(/no conoce/.test(z.stderr), 'acción on desconocido', z);
+      const p = await run([`${MOCK}/d6/`, 'action', 'things', '1', 'peek']);
+      exit(p, 3);
+      check((await comp(`${MOCK}/d6/`, 'get', 'things', '-f', '')).join() === 'name=,name[eq]=', 'autocompletado de filtros');
+    });
+    await test('id_from desconocido: no manda id; sin él, crea (§5.1)', async () => {
+      const a = await run([`${MOCK}/d6/`, 'create', 'things', '-d', '{"id":"a1","x":1}']);
+      exit(a, 3); check(/id_from "derived"/.test(a.stderr), 'mensaje', a);
+      const r = await run([`${MOCK}/d6/`, 'create', 'things', '-d', '{"id":"a1"}', '--raw']);
+      exit(r, 3);
+      const b = await run([`${MOCK}/d6/`, 'create', 'things', '-d', '{"x":1}']);
+      ok(b); check(b.json().echo.method === 'POST', 'crea sin id', b);
+      const c = await run([REF, 'create', 'books', '-d', '{"id":"zz","title":"X","price":"1.00"}']);
+      exit(c, 3); check(/lo asigna el servidor/.test(c.stderr), 'id con id_from server', c);
+    });
+    await test('anonymous: false: sin credenciales no manda Idempotency-Key (§7.1)', async () => {
+      const a = await run([`${MOCK}/d6/`, 'create', 'things', '-d', '{"x":1}']);
+      ok(a); check(a.json().echo.key === null, 'manda la clave sin credenciales', a);
+      const b = await run([`${MOCK}/d6/`, 'create', 'things', '-d', '{"x":1}', '--idempotency-key', 'k1']);
+      exit(b, 3); check(/anonymous/.test(b.stderr), 'clave explícita', b);
+      const c = await run([`${MOCK}/d6/`, 'create', 'things', '-d', '{"x":1}', '--token', 't']);
+      ok(c); check(/^"[0-9a-f-]{36}"$/.test(c.json().echo.key), 'con credenciales sí', c);
+    });
+    await test('inherit experimental solo con el borrador que conoce (§1.2)', async () => {
+      const a = await run([`${MOCK}/d6/`, 'describe', 'things']);
+      ok(a); check(/Heredado rate/.test(a.stdout), 'draft 6 lo muestra', a);
+      const b = await run([`${MOCK}/d7/`, 'describe', 'things']);
+      ok(b); check(!/Heredado/.test(b.stdout), 'draft 7 lo muestra', b);
+      const c = await run([`${MOCK}/d7/`, 'describe']);
+      ok(c); check(/inherit es la de 1\.0-draft\.7/.test(c.stdout), 'aviso', c);
+    });
+    await test('un + literal va como %2B; next con otro esquema no se sigue (§5.2, §3)', async () => {
+      const q = await run([REF, 'get', 'books', '-f', 'search=a+b c', '--curl']);
+      ok(q); check(q.stdout.includes('search%5D=a%2Bb+c'), 'codificación', q);
+      const n = await run([`${MOCK}/d6/`, 'get', 'pages', '--all']);
+      exit(n, 1); check(/esquema/.test(n.stderr), 'ftp', n);
+    });
+    await test('las credenciales de -H no van a otro origen (§4.3)', async () => {
+      const r = await run([`${MOCK}/xo/`, 'describe', '-o', 'json', '-H', 'Authorization: Bearer x', '-H', 'Cookie: s=1', '--token', 'y']);
+      ok(r); check(r.json()['x-auth'] === null && r.json()['x-cookie'] === null, 'manda credenciales a 127.0.0.1', r);
+    });
+
+    console.log('autocompletado');
     await test('scripts de zsh y bash', async () => {
       const z = await run(['completion', 'zsh']);
       ok(z); check(/compdef _restep restep/.test(z.stdout) && /restep __complete/.test(z.stdout), 'zsh', z);
@@ -413,7 +605,11 @@ async function main() {
     await test('órdenes, alias y colecciones', async () => {
       check((await comp('')).includes('@tienda'), 'alias');
       check((await comp(REF, '')).includes('describe'), 'órdenes');
-      check((await comp(REF, 'get', '')).join() === 'books,products,categories', 'colecciones');
+      // Borrador 6: get también completa los recursos sueltos (§5.9).
+      // Las colecciones y los recursos sueltos se leen del descubrimiento de la referencia, que crece.
+      const refDoc = await (await fetch(`${REF}/`)).json();
+      const want = [...Object.keys(refDoc.collections), ...Object.keys(refDoc.singletons ?? {})].join();
+      check((await comp(REF, 'get', '')).join() === want, `colecciones y recursos sueltos (${want})`);
       check((await comp('@tienda', 'get', '')).includes('books'), 'colecciones con alias');
     });
     await test('filtros, valores de enum, orden y campos', async () => {

@@ -40,19 +40,23 @@ Uso:
   restep [<url> | @alias] <orden> [argumentos] [opciones]
 
 Órdenes:
-  describe [colección]                Qué ofrece la API, o una colección
+  describe [colección|recurso]        Qué ofrece la API, o una colección o un recurso suelto
   get <colección>                     Lista (una página; --all las recorre todas)
   get <colección> <id>                Un elemento
+  get <recurso>                       Un recurso suelto (singleton, §5.9), sin id
   create <colección> --data <json>    Crea (con Idempotency-Key automática)
   update <colección> <id> --data ...  Actualiza con JSON Merge Patch
+  update <recurso> --data ...         Actualiza un recurso suelto, sin id
   delete <colección> <id>             Borra
   action <colección> [<id>] <nombre>  Ejecuta una acción (extensión actions)
   completion zsh|bash                 Script de autocompletado
 
 Consulta (get de una colección):
   -f, --filter campo=valor            También campo[op]=valor, campo<=valor, campo!=valor...
+                                      Un filtro con nombre: -f nombre (interruptor) o -f nombre=valor
   -s, --sort -campo,campo             Orden; "-" delante es descendente
       --fields a,b                    Solo esos campos (también en get de un elemento)
+  -i, --include rel,rel.rel           Incluye relaciones (perfil relations, hasta include_depth)
   -n, --limit N                       Tamaño de página
       --all                           Sigue "next" hasta el final
       --count                         Solo el total
@@ -85,7 +89,7 @@ Códigos de salida: 0 bien · 2 uso · 3 rechazado antes de enviar · 4 red · 5
 
 // ── Argumentos ────────────────────────────────────────────────────────────────
 const VALUE_OPTS = {
-  filter: 'filter', f: 'filter', sort: 'sort', s: 'sort', fields: 'fields', limit: 'limit', n: 'limit',
+  filter: 'filter', f: 'filter', sort: 'sort', s: 'sort', fields: 'fields', include: 'include', i: 'include', limit: 'limit', n: 'limit',
   format: 'format', o: 'format', data: 'data', d: 'data', 'if-match': 'ifMatch', 'idempotency-key': 'idempotencyKey',
   header: 'header', H: 'header', token: 'token', language: 'language', parent: 'parent', p: 'parent', retry: 'retry',
 };
@@ -182,15 +186,30 @@ function resolveTarget(first, opts, config = loadConfig()) {
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const CREDENTIAL_HEADERS = ['authorization', 'cookie', 'proxy-authorization', 'dpop'];
+// Si la petición lleva credenciales (token o una cabecera de credenciales con -H): §7.1, anonymous.
+const hasCredentials = (ctx) => Boolean(ctx.token) || ctx.opts.header.some((raw) => CREDENTIAL_HEADERS.includes(raw.slice(0, raw.indexOf(':')).trim().toLowerCase()));
+// 3: un enlace absoluto de la API solo se sigue si es https o tiene el esquema de la raíz.
+function checkScheme(ctx, url) {
+  const u = new URL(url);
+  if (u.protocol !== 'https:' && u.protocol !== ctx.root.protocol)
+    throw new CliError(EXIT.other, `La API enlaza ${u.href}, con un esquema que no es https ni el de la raíz (${ctx.root.protocol}): no se sigue (§3).`);
+  return u;
+}
+
 function baseHeaders(ctx, url) {
   const h = { accept: 'application/json, application/problem+json' };
   if (ctx.language) h['accept-language'] = ctx.language;
   // 4.3: las credenciales solo van al origen de la API.
   if (ctx.token && new URL(url).origin === ctx.root.origin) h.authorization = `Bearer ${ctx.token}`;
+  const sameOrigin = new URL(url).origin === ctx.root.origin;
   for (const raw of ctx.opts.header) {
     const i = raw.indexOf(':');
     if (i < 1) throw usage(`Cabecera mal formada: «${raw}». Usa «Nombre: valor».`);
-    h[raw.slice(0, i).trim().toLowerCase()] = raw.slice(i + 1).trim();
+    const name = raw.slice(0, i).trim().toLowerCase();
+    // 4.3: tampoco las credenciales que se pasan con -H salen del origen de la API.
+    if (!sameOrigin && CREDENTIAL_HEADERS.includes(name)) continue;
+    h[name] = raw.slice(i + 1).trim();
   }
   return h;
 }
@@ -251,6 +270,33 @@ const backoff = (attempt) => Math.min(500 * 2 ** (attempt - 1), 10_000);
 // ── Descubrimiento (§4.2), con caché local ────────────────────────────────────
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isDiscovery = (d) => isObject(d) && typeof d.restep === 'string';
+// 1.1: gramática de la versión; con otra forma o con una mayor distinta de 1 no es Restep 1.
+const VERSION_RE = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(draft|rc)\.(0|[1-9][0-9]*))?$/;
+function checkVersion(doc) {
+  const m = VERSION_RE.exec(doc.restep);
+  if (!m || m[1] !== '1') {
+    const err = new CliError(EXIT.other, `La API declara "restep": ${JSON.stringify(doc.restep)}: no es Restep 1 y esta CLI no la puede usar (§1.1).`,
+      [m ? 'Es otra versión mayor de Restep: hace falta un cliente de esa versión.' : 'El valor no sigue la gramática de 1.1 (como "1.0" o "1.0-draft.6").']);
+    err.notRestep1 = true;
+    throw err;
+  }
+}
+// 1.2: las partes experimentales solo se usan si el servidor declara una versión cuyo texto implementa
+// esta CLI; para un borrador, ese mismo borrador.
+const EXPERIMENTAL_TEXTS = ['1.0-draft.6'];
+const experimentalOk = (doc, ext) => has(doc, 'extensions', ext) && EXPERIMENTAL_TEXTS.includes(doc?.restep);
+// 4.2: tipos y valores que conoce esta CLI; un filtro, una acción o un aviso con un valor desconocido
+// se trata como si no estuviera declarado.
+const FILTER_TYPES = ['string', 'integer', 'number', 'decimal', 'boolean', 'date', 'datetime', 'duration', 'enum'];
+const FILTER_OPS = ['eq', 'ne', 'lt', 'le', 'gt', 'ge', 'in', 'null'];
+const knownFilter = (d) => isObject(d) && FILTER_TYPES.includes(d.type);
+const knownNamed = (d) => isObject(d) && (d.type === undefined || FILTER_TYPES.includes(d.type));
+const knownAction = (d) => isObject(d) && ['item', 'collection'].includes(d.on) && [undefined, 'POST', 'GET'].includes(d.method);
+const usableFilters = (decl) => Object.fromEntries(Object.entries(isObject(decl?.filter) ? decl.filter : {}).filter(([, d]) => knownFilter(d)));
+const usableNamed = (decl) => Object.fromEntries(Object.entries(isObject(decl?.named_filters) ? decl.named_filters : {}).filter(([, d]) => knownNamed(d)));
+// 5.9: un recurso suelto con plantilla o con parent se ignora (formas reservadas).
+const usableSingletons = (doc) => Object.fromEntries(Object.entries(isObject(doc?.singletons) ? doc.singletons : {})
+  .filter(([, d]) => isObject(d) && typeof d.path === 'string' && !/[{}]/.test(d.path) && d.parent === undefined));
 const sha = (s) => createHash('sha256').update(s).digest('hex');
 const cacheDir = () => process.env.RESTEP_CACHE_DIR
   || join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'restep');
@@ -291,12 +337,13 @@ function maxAge(headers) {
 async function discover(ctx, { fresh = false, completion = false } = {}) {
   const cached = readCache(ctx);
   const age = cached ? (Date.now() - cached.saved) / 1000 : Infinity;
-  if (cached && !fresh && (age < cached.maxAge || (completion && age < COMPLETION_CACHE))) return { doc: cached.doc, cached: true };
+  if (cached && !fresh && (age < cached.maxAge || (completion && age < COMPLETION_CACHE))) { checkVersion(cached.doc); return { doc: cached.doc, cached: true }; }
   const timeout = completion ? 2000 : undefined;
   const get = (url, etag) => request(ctx, 'GET', url, { quiet: true, timeout, headers: etag ? { 'if-none-match': etag } : {} });
   let res = await get(ctx.root, cached?.etag);
   if (res.status === 304 && cached) {
     writeCache(ctx, { ...cached, saved: Date.now(), maxAge: maxAge(res.headers) ?? 0 });
+    checkVersion(cached.doc);
     return { doc: cached.doc, cached: false };
   }
   if (res.status === 401 || res.status === 403) {
@@ -308,12 +355,15 @@ async function discover(ctx, { fresh = false, completion = false } = {}) {
     // 4.2: con la raíz ocupada, el descubrimiento se enlaza con rel="service-desc"; vale el primero que lo sea.
     let found = null;
     for (const href of linkTargets(res.headers.get('link'), 'service-desc')) {
-      const d = await get(new URL(href, res.url));
+      const target = new URL(href, res.url);
+      if (!['https:', ctx.root.protocol].includes(target.protocol)) continue; // §3
+      const d = await get(target);
       if (isDiscovery(d.data)) { found = d; break; }
     }
     if (!found) return { doc: null, cached: false };
     res = found;
   }
+  checkVersion(res.data);
   const ttl = maxAge(res.headers);
   if (ttl !== null) writeCache(ctx, { saved: Date.now(), maxAge: ttl, etag: res.headers.get('etag'), url: res.url, doc: res.data });
   return { doc: res.data, cached: false };
@@ -327,8 +377,10 @@ function collection(ctx, name) {
   if (!name) throw usage('Falta la colección.');
   const all = ctx.doc?.collections;
   if (isObject(all) && Object.hasOwn(all, name)) return { name, decl: all[name], path: all[name].path ?? `/${name}` };
+  const singles = usableSingletons(ctx.doc);
+  if (Object.hasOwn(singles, name)) return { name, decl: singles[name], path: singles[name].path, singleton: true };
   if (ctx.opts.raw || !ctx.doc) return { name, decl: null, path: `/${encodeURIComponent(name)}` };
-  throw local(`La API no tiene ninguna colección «${name}».`, unknownHints(name, Object.keys(all ?? {}), 'Colecciones'));
+  throw local(`La API no tiene ninguna colección ni recurso suelto «${name}».`, unknownHints(name, [...Object.keys(all ?? {}), ...Object.keys(singles)], 'Colecciones y recursos sueltos'));
 }
 // 5.1: la plantilla de URI de una subcolección se expande con los id de los padres, por orden.
 function collectionPath(coll, parents) {
@@ -345,8 +397,17 @@ function collectionPath(coll, parents) {
 const apiUrl = (ctx, path) => new URL(`./${path.replace(/^\//, '')}`, ctx.root);
 const itemPath = (ctx, coll, id) => `${collectionPath(coll, ctx.opts.parent)}/${encodeURIComponent(id)}`;
 
+// 5.9: un recurso suelto solo admite GET y PATCH; ni se crea, ni se borra, ni tiene elementos.
+function notSingleton(coll, what) {
+  if (coll.singleton) throw local(`«${coll.name}» es un recurso suelto (${coll.path}): ${what}.`, ['Admite get y update, sin id.']);
+}
 function requireMethod(ctx, coll, method, item) {
   if (ctx.opts.raw || !coll.decl) return;
+  if (coll.singleton) {
+    const list = coll.decl.methods;
+    if (Array.isArray(list) && !list.includes(method)) throw local(`El recurso suelto «${coll.name}» no admite ${method}.`, [`Admite: ${list.join(', ')}.`]);
+    return;
+  }
   const list = coll.decl[item ? 'item_methods' : 'methods'];
   if (Array.isArray(list) && !list.includes(method))
     throw local(`${item ? 'Los elementos de' : 'La colección'} «${coll.name}» no admite${item ? 'n' : ''} ${method}.`, [`Admite: ${list.join(', ')}.`]);
@@ -355,6 +416,8 @@ function requireMethod(ctx, coll, method, item) {
 // ── Filtros, orden, campos (§6) ───────────────────────────────────────────────
 const SYMBOLS = { '=': 'eq', '!=': 'ne', '<': 'lt', '<=': 'le', '>': 'gt', '>=': 'ge' };
 function parseFilter(raw) {
+  // Solo un nombre: un filtro con nombre sin valor, un interruptor (§6.1).
+  if (/^[^[\]=<>!]+$/.test(raw)) return { field: raw, op: 'eq', value: '', key: `filter[${raw}]`, bare: true };
   const m = /^([^[\]=<>!]+)(?:\[([a-z]+)\])?(!=|<=|>=|=|<|>)([\s\S]*)$/.exec(raw);
   if (!m) throw usage(`Filtro mal formado: «${raw}».`, ['Usa campo=valor, campo[op]=valor o campo<=valor.']);
   const [, field, bracket, symbol, value] = m;
@@ -387,12 +450,26 @@ function validateFilters(ctx, coll, filters) {
   const decl = coll.decl;
   if (!decl || ctx.opts.raw) return;
   if (!has(ctx.doc, 'profiles', 'query')) throw local('La API no anuncia el perfil query: no admite filtros, orden, campos ni tamaño de página.');
-  const declared = isObject(decl.filter) ? decl.filter : {};
+  const declared = usableFilters(decl);
+  const named = usableNamed(decl);
   const seen = new Set();
   for (const f of filters) {
+    // §6.1: un filtro con nombre no lleva operador; un interruptor, tampoco valor.
+    if (Object.hasOwn(named, f.field)) {
+      const n = isObject(named[f.field]) ? named[f.field] : {};
+      if (f.key !== `filter[${f.field}]`) throw local(`«${f.field}» es un filtro con nombre: no lleva operador.`, [n.type ? `Usa -f ${f.field}=valor.` : `Usa -f ${f.field}.`]);
+      if (seen.has(f.field)) throw local(`El filtro ${f.field} aparece dos veces.`);
+      seen.add(f.field);
+      if (!n.type && f.value !== '') throw local(`«${f.field}» es un interruptor: no lleva valor.`, [`Usa -f ${f.field}.`]);
+      if (n.type && f.value === '') throw local(`«${f.field}» necesita un valor ${n.type}.`, [`Usa -f ${f.field}=valor.`]);
+      if (n.type) checkValue(n, f.value, `Filtro ${f.field}`);
+      continue;
+    }
+    if (f.bare && Object.hasOwn(declared, f.field)) throw local(`«${f.field}» filtra un campo y necesita un valor.`, [`Usa -f ${f.field}=valor o -f ${f.field}[op]=valor.`]);
+    if (f.bare) throw local(`«${f.field}» no es un filtro con nombre de «${coll.name}».`, unknownHints(f.field, Object.keys(named), 'Filtros con nombre'));
     const d = declared[f.field];
-    if (!d) throw local(`La colección «${coll.name}» no admite filtrar por «${f.field}».`, unknownHints(f.field, Object.keys(declared), 'Filtros'));
-    const ops = d.ops ?? [];
+    if (!d) throw local(`La colección «${coll.name}» no admite filtrar por «${f.field}».`, unknownHints(f.field, [...Object.keys(declared), ...Object.keys(named)], 'Filtros'));
+    const ops = (d.ops ?? []).filter((op) => FILTER_OPS.includes(op));
     if (!ops.includes(f.op)) throw local(`«${f.field}» no admite el operador ${f.op}.`, [`Operadores de ${f.field}: ${ops.join(', ') || 'ninguno'}.`]);
     const id = `${f.field}[${f.op}]`;
     if (seen.has(id)) throw local(`El filtro ${id} aparece dos veces.`);
@@ -448,6 +525,35 @@ function buildQuery(ctx, coll, { list }) {
       if (known && !f.includes('.') && !known.includes(f)) throw local(`La colección «${coll.name}» no tiene el campo «${f}».`, unknownHints(f, known, 'Campos'));
     }
     q.set('fields', o.fields);
+  }
+  // §9: include, solo en lecturas, por relaciones declaradas con "include": true y sin pasar de
+  // include_depth (1 si no lo declara). Una relación a varias colecciones solo puede ir al final.
+  if (o.include !== undefined) {
+    if (decl) {
+      if (coll.singleton) throw local(`«${coll.name}» es un recurso suelto: no admite include (§5.9).`);
+      if (!has(ctx.doc, 'profiles', 'relations')) throw local('La API no anuncia el perfil relations: no admite include (§9).');
+      const depth = Number.isInteger(decl.include_depth) && decl.include_depth > 0 ? decl.include_depth : 1;
+      for (const path of o.include.split(',')) {
+        if (!path) throw local('--include tiene una ruta vacía.');
+        const parts = path.split('.');
+        if (parts.length > depth) throw local(`«${path}» pasa de la profundidad de include de «${coll.name}» (${depth}) (§9).`);
+        let cur = decl, curName = coll.name;
+        parts.forEach((rel, i) => {
+          const rels = isObject(cur?.relations) ? cur.relations : {};
+          const r = rels[rel];
+          if (!isObject(r) || r.include !== true) {
+            throw local(`«${rel}» no es una relación de «${curName}» que se pueda incluir.`,
+              unknownHints(rel, Object.keys(rels).filter((k) => isObject(rels[k]) && rels[k].include === true), 'Relaciones con include'));
+          }
+          if (i < parts.length - 1) {
+            if (typeof r.to !== 'string') throw local(`«${rel}» apunta a varias colecciones (${[].concat(r.to).join(', ')}): esta CLI no sigue include más allá de ella.`);
+            cur = ctx.doc?.collections?.[r.to];
+            curName = r.to;
+          }
+        });
+      }
+    }
+    q.set('include', o.include);
   }
   if (list && o.limit !== undefined) {
     needQuery();
@@ -610,13 +716,13 @@ function problemHints(ctx, res, p, coll) {
   const code = p?.code;
   if (code === 'unsupported_parameter' && decl) {
     const param = String(p.parameter ?? '');
-    if (param.startsWith('filter')) hints.push(`filtros de «${coll.name}»: ${Object.entries(decl.filter ?? {}).map(([f, d]) => `${f} (${(d.ops ?? []).join(', ')})`).join('; ') || 'ninguno'}.`);
+    if (param.startsWith('filter')) hints.push(`filtros de «${coll.name}»: ${Object.entries(decl.filter ?? {}).map(([f, d]) => `${f} (${(d.ops ?? []).join(', ')})`).join('; ') || 'ninguno'}${isObject(decl.named_filters) && Object.keys(decl.named_filters).length ? `; con nombre: ${Object.keys(decl.named_filters).join(', ')}` : ''}.`);
     if (param === 'sort') hints.push(`orden de «${coll.name}»: ${(decl.sort ?? []).join(', ') || 'ninguno'}.`);
     hints.push('la API no ofrece eso: no sirve reintentarlo.');
   }
   if (code === 'invalid_parameter' && p.parameter === 'cursor') hints.push('vuelve a la primera página: el cursor no vale para esta consulta.');
   for (const e of Array.isArray(p?.errors) ? p.errors : []) {
-    if (e.code !== 'read_only' || !isObject(decl?.inherit)) continue;
+    if (e.code !== 'read_only' || !isObject(decl?.inherit) || !experimentalOk(ctx.doc, 'inherit')) continue;
     const f = String(e.pointer ?? '').slice(1);
     if (decl.inherit[f]?.own) hints.push(`«${f}» es un valor heredado: escribe «${decl.inherit[f].own}» (null para volver a heredar).`);
   }
@@ -643,7 +749,7 @@ async function cmdDescribe(ctx, [name]) {
   if (name !== undefined) {
     const coll = collection({ ...ctx, opts: { ...ctx.opts, raw: false } }, name);
     if (ctx.opts.format === 'json') return out(json(coll.decl));
-    return out(describeCollection(ctx, coll));
+    return out(coll.singleton ? describeSingleton(coll) : describeCollection(ctx, coll));
   }
   if (ctx.opts.format === 'json') return out(json(doc));
   const lines = [`Restep ${doc.restep}${doc.version ? ` · versión ${doc.version} de la API` : ''} · ${ctx.root.href}`];
@@ -659,17 +765,43 @@ async function cmdDescribe(ctx, [name]) {
     métodos: [c.methods?.join(' '), c.item_methods ? `elemento: ${c.item_methods.join(' ')}` : ''].filter(Boolean).join(' · '),
     descripción: c.description ?? '',
   })), ['colección', 'ruta', 'métodos', 'descripción'], 60));
+  const singles = Object.entries(usableSingletons(doc));
+  if (singles.length) {
+    lines.push('', 'Recursos sueltos (§5.9; get y update sin id):');
+    lines.push(table(singles.map(([n, c]) => ({ recurso: n, ruta: c.path, métodos: (c.methods ?? []).join(' '), descripción: c.description ?? '' })),
+      ['recurso', 'ruta', 'métodos', 'descripción'], 60));
+  }
+  if (has(doc, 'extensions', 'inherit') && !experimentalOk(doc, 'inherit'))
+    lines.push('', `La extensión experimental inherit es la de ${doc.restep}, cuyo texto esta CLI no conoce: no la usa (§1.2).`);
   out(lines.join('\n'));
+}
+function describeSingleton({ name, decl: c }) {
+  const L = [`${name}  ${c.path}  (recurso suelto, §5.9)`];
+  if (c.description) L.push(`  ${c.description}`);
+  if (c.methods) L.push(`  Métodos: ${c.methods.join(', ')}`);
+  const fields = knownFields(c);
+  if (fields) L.push(`  Campos: ${fields.join(', ')}`);
+  for (const k of ['item', 'update']) if (typeof c.schemas?.[k] === 'string') L.push(`  Esquema ${k}: ${c.schemas[k]}`);
+  return L.join('\n');
 }
 function describeCollection(ctx, { name, decl: c }) {
   const L = [`${name}  ${c.path ?? ''}`];
   if (c.description) L.push(`  ${c.description}`);
   if (c.methods || c.item_methods) L.push(`  Métodos: ${(c.methods ?? ['?']).join(', ')}; elemento: ${(c.item_methods ?? ['?']).join(', ')}`);
-  const filters = Object.entries(c.filter ?? {});
+  const filters = Object.entries(usableFilters(c));
+  const ignored = [...Object.keys(isObject(c.filter) ? c.filter : {}).filter((f) => !knownFilter(c.filter[f])),
+    ...Object.keys(isObject(c.named_filters) ? c.named_filters : {}).filter((f) => !knownNamed(c.named_filters[f]))];
   if (filters.length) {
     L.push('  Filtros:');
     for (const line of table(filters.map(([f, d]) => ({ campo: f, tipo: d.type ?? '', operadores: (d.ops ?? []).join(', '),
       valores: (d.values ?? []).join(', '), descripción: d.description ?? '' })), undefined, 60).split('\n')) L.push(`    ${line}`);
+  }
+  const named = Object.entries(usableNamed(c));
+  if (ignored.length) L.push(`  Filtros con un tipo que esta CLI no conoce (no se usan, §4.2): ${ignored.join(', ')}`);
+  if (named.length) {
+    L.push('  Filtros con nombre (sin operadores; -f nombre o -f nombre=valor):');
+    for (const line of table(named.map(([f, d]) => ({ nombre: f, valor: d?.type ?? 'ninguno (interruptor)',
+      valores: (d?.values ?? []).join(', '), descripción: d?.description ?? '' })), undefined, 60).split('\n')) L.push(`    ${line}`);
   }
   if (c.sort?.length) L.push(`  Orden: ${c.sort.join(', ')}`);
   const page = [c.max_limit && `max_limit ${c.max_limit}`, c.count && `count ${c.count}`].filter(Boolean);
@@ -678,25 +810,36 @@ function describeCollection(ctx, { name, decl: c }) {
   if (fields) L.push(`  Campos: ${fields.join(', ')}`);
   const create = c.schemas?.create;
   if (isObject(create) && create.required?.length) L.push(`  Obligatorios al crear: ${create.required.join(', ')}`);
+  // §4.3: lo que vale un campo que el POST no trae.
+  const defaults = Object.entries(isObject(create?.properties) ? create.properties : {}).filter(([, p]) => isObject(p) && Object.hasOwn(p, 'default'));
+  if (defaults.length) L.push(`  Por defecto al crear: ${defaults.map(([f, p]) => `${f}=${JSON.stringify(p.default)}`).join(', ')}`);
   for (const k of ['item', 'create', 'update']) if (typeof c.schemas?.[k] === 'string') L.push(`  Esquema ${k}: ${c.schemas[k]}`);
   if (c.language_maps) L.push(`  Mapas de idioma: ${Object.keys(c.language_maps).join(', ')}`);
   for (const [r, d] of Object.entries(c.relations ?? {})) L.push(`  Relación ${r} → ${d.to}${d.many ? ' (a muchos)' : ''}${d.include ? ' · include' : ''}${d.description ? ` · ${d.description}` : ''}`);
-  for (const [f, d] of Object.entries(c.inherit ?? {})) L.push(`  Heredado ${f}: se escribe en ${d.own}; de ${(d.from ?? []).join(', ') || '—'}${d.description ? ` · ${d.description}` : ''}`);
+  if (c.id_from) L.push(`  id: ${({ server: 'lo asigna el servidor', client: 'lo elige el cliente (obligatorio al crear)', either: 'lo puede elegir el cliente' })[c.id_from] ?? `id_from desconocido (${c.id_from}): no se manda id al crear`}`);
+  if (isObject(c.collations)) L.push(`  Comparación: ${Object.entries(c.collations).map(([f, v]) => `${f} ${v === 'codepoint' ? 'por puntos de código' : 'la del servidor'}`).join(', ')}`);
+  if (c.parent) L.push(`  Subcolección de ${c.parent}: --parent con el id de cada padre`);
+  if (experimentalOk(ctx.doc, 'inherit')) for (const [f, d] of Object.entries(isObject(c.inherit) ? c.inherit : {})) L.push(`  Heredado ${f}: se escribe en ${d.own}; de ${(d.from ?? []).join(', ') || '—'}${d.description ? ` · ${d.description}` : ''}`);
   for (const [a, d] of Object.entries(c.actions ?? {})) {
+    if (!knownAction(d)) { L.push(`  Acción ${a}: declarada con un on o un method que esta CLI no conoce; no se usa (§4.2)`); continue; }
     const traits = [d.on === 'collection' ? 'colección' : 'elemento', d.method ?? 'POST', d.safe ? 'segura' : null, d.idempotent ? 'idempotente' : 'no idempotente'].filter(Boolean);
     L.push(`  Acción ${a} (${traits.join(', ')})${d.description ? `: ${d.description}` : ''}`);
   }
-  if (c.sync) L.push(`  Sync: retención ${c.sync.retention ?? '?'} s`);
+  if (c.sync) L.push(`  Sync: retención ${c.sync.retention ?? '?'} s (experimental; esta CLI no lo usa)`);
   return L.join('\n');
 }
 
 async function cmdGet(ctx, [name, id, ...extra]) {
   if (extra.length) throw usage(`Sobran argumentos: ${extra.join(' ')}.`);
   const coll = collection(ctx, name);
-  const list = id === undefined;
+  if (coll.singleton) {
+    if (id !== undefined) throw usage(`«${coll.name}» es un recurso suelto: get ${coll.name}, sin id.`);
+    if (ctx.opts.parent.length) throw usage('Un recurso suelto no tiene padre: sobra --parent.');
+  }
+  const list = id === undefined && !coll.singleton;
   requireMethod(ctx, coll, 'GET', !list);
   const q = buildQuery(ctx, coll, { list });
-  const path = list ? collectionPath(coll, ctx.opts.parent) : itemPath(ctx, coll, id);
+  const path = coll.singleton ? coll.path : list ? collectionPath(coll, ctx.opts.parent) : itemPath(ctx, coll, id);
   const url = apiUrl(ctx, path);
   url.search = q.toString();
   if (!list) {
@@ -732,7 +875,7 @@ async function cmdGet(ctx, [name, id, ...extra]) {
     if (fmt === 'ndjson') emitRows(fmt, res.data.items); else items.push(...res.data.items);
     const next = res.data.next;
     if (next === null || next === undefined) break;
-    const nextUrl = String(new URL(next, res.url));
+    const nextUrl = String(checkScheme(ctx, new URL(next, res.url)));
     if (seen.has(nextUrl)) throw new CliError(EXIT.other, `La API repite la página ${nextUrl}: se para para no entrar en un bucle.`);
     seen.add(nextUrl);
     res = await request(ctx, 'GET', nextUrl);
@@ -751,6 +894,12 @@ function emitRows(fmt, rows) {
 
 function idempotencyHeader(ctx) {
   const key = ctx.opts.idempotencyKey;
+  // 7.1: con "anonymous": false, una petición sin credenciales no lleva Idempotency-Key (daría 400).
+  const anonymousRefused = !ctx.opts.raw && ctx.doc?.idempotency?.anonymous === false && !hasCredentials(ctx);
+  if (anonymousRefused) {
+    if (key !== undefined) throw local('La API no acepta Idempotency-Key sin credenciales ("anonymous": false, §7.1): pasa --token o quita --idempotency-key.');
+    return {};
+  }
   if (key !== undefined) {
     if (!/^[\x20\x21\x23-\x5b\x5d-\x7e]*$/.test(key)) throw usage('--idempotency-key solo admite caracteres ASCII visibles, sin comillas ni barras inversas.');
     return { 'idempotency-key': `"${key}"` };
@@ -767,11 +916,26 @@ function printWrite(ctx, res) {
   if (res.status !== 204 || info.etag) printItem(ctx, info);
 }
 
+// 5.1: quién elige el id lo dice id_from. Con un valor desconocido, el cliente NO DEBE mandar id.
+function checkIdFrom(ctx, coll, value) {
+  if (!coll.decl || !isObject(value)) return;
+  const from = coll.decl.id_from;
+  const sent = Object.hasOwn(value, 'id');
+  if (from !== undefined && !['server', 'client', 'either'].includes(from)) {
+    if (sent) throw local(`«${coll.name}» declara id_from ${JSON.stringify(from)}, que esta CLI no conoce: no se puede mandar id al crear (§5.1).`);
+    return;
+  }
+  if (ctx.opts.raw) return;
+  if (sent && (from === undefined || from === 'server')) throw local(`En «${coll.name}» el id lo asigna el servidor: quita id del cuerpo (§5.1).`);
+  if (!sent && from === 'client') throw local(`En «${coll.name}» el id lo elige el cliente: el cuerpo necesita id (§5.1).`, ['Mejor uno aleatorio, como un UUID (§13.6).']);
+}
 async function cmdCreate(ctx, [name, ...extra]) {
   if (extra.length) throw usage(`Sobran argumentos: ${extra.join(' ')}.`);
   const coll = collection(ctx, name);
+  notSingleton(coll, 'no se crea');
   requireMethod(ctx, coll, 'POST', false);
   const body = readBody(ctx, true);
+  checkIdFrom(ctx, coll, body.value);
   validateBody(ctx, coll.decl?.schemas?.create, body.value, `create de «${coll.name}»`);
   const url = apiUrl(ctx, collectionPath(coll, ctx.opts.parent));
   const headers = { 'content-type': 'application/json', ...idempotencyHeader(ctx), ...preferHeader(ctx), ...ifMatchHeader(ctx) };
@@ -805,15 +969,16 @@ async function safeIfMatch(ctx, coll, url) {
 }
 
 async function cmdUpdate(ctx, [name, id, ...extra]) {
-  if (id === undefined) throw usage('Falta el id: restep update <colección> <id> --data \'{...}\'.');
   if (extra.length) throw usage(`Sobran argumentos: ${extra.join(' ')}.`);
   const coll = collection(ctx, name);
+  if (coll.singleton && id !== undefined) throw usage(`«${coll.name}» es un recurso suelto: update ${coll.name} --data '{...}', sin id.`);
+  if (!coll.singleton && id === undefined) throw usage('Falta el id: restep update <colección> <id> --data \'{...}\'.');
   requireMethod(ctx, coll, 'PATCH', true);
   const body = readBody(ctx, true);
   validateBody(ctx, coll.decl?.schemas?.update, body.value, `update de «${coll.name}»`);
-  if (!ctx.opts.raw && body.value && 'id' in body.value && String(body.value.id) !== id)
+  if (!coll.singleton && !ctx.opts.raw && body.value && 'id' in body.value && String(body.value.id) !== id)
     throw local('El parche trae un id distinto del elemento: el id no se puede cambiar (§5.1).');
-  const url = apiUrl(ctx, itemPath(ctx, coll, id));
+  const url = apiUrl(ctx, coll.singleton ? coll.path : itemPath(ctx, coll, id));
   const cond = await safeIfMatch(ctx, coll, url);
   if (cond.problem) return showProblem(ctx, cond.problem, coll);
   const headers = { 'content-type': 'application/merge-patch+json', ...cond, ...preferHeader(ctx) };
@@ -828,6 +993,7 @@ async function cmdDelete(ctx, [name, id, ...extra]) {
   if (id === undefined) throw usage('Falta el id: restep delete <colección> <id>.');
   if (extra.length) throw usage(`Sobran argumentos: ${extra.join(' ')}.`);
   const coll = collection(ctx, name);
+  notSingleton(coll, 'no se borra');
   requireMethod(ctx, coll, 'DELETE', true);
   if (ctx.opts.data !== undefined) throw usage('delete no lleva cuerpo.');
   const url = apiUrl(ctx, itemPath(ctx, coll, id));
@@ -840,18 +1006,20 @@ async function cmdDelete(ctx, [name, id, ...extra]) {
   return EXIT.ok;
 }
 
-// 10.1: POST /coleccion/id:accion o /coleccion:accion; GET si la acción lo declara.
+// 11.1: POST /coleccion/id:accion o /coleccion:accion; GET si la acción lo declara.
 async function cmdAction(ctx, [name, a, b, ...extra]) {
   if (extra.length) throw usage(`Sobran argumentos: ${extra.join(' ')}.`);
   if (a === undefined) throw usage('Uso: restep action <colección> [<id>] <acción>.');
   const [id, action] = b === undefined ? [undefined, a] : [a, b];
   const coll = collection(ctx, name);
+  notSingleton(coll, 'Restep 1 no define acciones en un recurso suelto');
   let decl = null;
   if (!ctx.opts.raw && coll.decl) {
     if (!has(ctx.doc, 'extensions', 'actions')) throw local('La API no anuncia la extensión actions.');
     const actions = isObject(coll.decl.actions) ? coll.decl.actions : {};
     decl = actions[action];
-    if (!decl) throw local(`La colección «${coll.name}» no tiene la acción «${action}».`, unknownHints(action, Object.keys(actions), 'Acciones'));
+    if (!decl) throw local(`La colección «${coll.name}» no tiene la acción «${action}».`, unknownHints(action, Object.keys(actions).filter((a) => knownAction(actions[a])), 'Acciones'));
+    if (!knownAction(decl)) throw local(`La acción «${action}» se declara con un on o un method que esta CLI no conoce (${JSON.stringify({ on: decl.on, method: decl.method })}): no se usa (§4.2).`);
     if (decl.on === 'item' && id === undefined) throw usage(`«${action}» es una acción de elemento: restep action ${coll.name} <id> ${action}.`);
     if (decl.on === 'collection' && id !== undefined) throw usage(`«${action}» es una acción de la colección: restep action ${coll.name} ${action}.`);
   }
@@ -946,8 +1114,9 @@ async function complete(words) {
   let doc = null;
   try { doc = (await discover(ctx, { completion: true })).doc; } catch { return []; }
   const colls = doc?.collections ?? {};
-  if (rest.length === 1 && !pending) return Object.keys(colls);
-  const c = colls[name];
+  const singles = ['get', 'update', 'describe'].includes(command) ? Object.keys(usableSingletons(doc)) : [];
+  if (rest.length === 1 && !pending) return [...Object.keys(colls), ...singles.filter((n) => !Object.hasOwn(colls, n))];
+  const c = colls[name] ?? usableSingletons(doc)[name];
   if (!c) return [];
   const listAfter = (prefixWord, options) => { // listas con comas: completa el último trozo
     const i = prefixWord.lastIndexOf(',');
@@ -956,20 +1125,21 @@ async function complete(words) {
   };
   if (pending === 'filter') {
     const m = /^([^[\]=<>!]+)(\[[a-z]+\])?(=|!=|<=|>=|<|>)(.*)$/.exec(cur);
-    const filters = isObject(c.filter) ? c.filter : {};
+    const filters = usableFilters(c);
     if (m && filters[m[1]]) {
       const d = filters[m[1]], head = cur.slice(0, cur.length - m[4].length);
       const op = m[2]?.slice(1, -1);
       const values = op === 'null' || d.type === 'boolean' ? ['true', 'false'] : d.type === 'enum' ? d.values ?? [] : [];
       return op === 'in' ? listAfter(m[4], values).map((v) => head + v) : values.map((v) => head + v);
     }
-    return Object.entries(filters).flatMap(([f, d]) => [`${f}=`, ...(d.ops ?? []).map((op) => `${f}[${op}]=`)]);
+    const named = Object.entries(usableNamed(c)).map(([f, d]) => (d?.type ? `${f}=` : f));
+    return [...Object.entries(filters).flatMap(([f, d]) => [`${f}=`, ...(d.ops ?? []).filter((op) => FILTER_OPS.includes(op)).map((op) => `${f}[${op}]=`)]), ...named];
   }
   if (pending === 'sort') return listAfter(cur, (c.sort ?? []).flatMap((s) => [s, `-${s}`]));
   if (pending === 'fields') return listAfter(cur, knownFields(c) ?? []);
   if (pending) return [];
   if (command === 'action' && isObject(c.actions)) {
-    const on = (kind) => Object.entries(c.actions).filter(([, d]) => d.on === kind).map(([a]) => a);
+    const on = (kind) => Object.entries(c.actions).filter(([, d]) => knownAction(d) && d.on === kind).map(([a]) => a);
     if (args.length === 0) return on('collection');
     if (args.length === 1) return on('item');
   }
@@ -1006,7 +1176,7 @@ async function main(argv) {
       ctx.doc = d.doc; ctx.cached = d.cached;
     } catch (e) {
       // Con --raw o --curl se sigue sin descubrimiento; si no, el error manda.
-      if (!(ctx.opts.raw || ctx.opts.curl) || command === 'describe') {
+      if (!(ctx.opts.raw || ctx.opts.curl) || command === 'describe' || e.notRestep1) {
         if (e.response) return showProblem(ctx, e.response);
         throw e;
       }
