@@ -6,8 +6,8 @@ y valida colecciones, filtros, orden, campos y cuerpos antes de enviar nada. Un 
 Node 18+, sin dependencias.
 
 ```bash
-node tools/restep-cli/restep.mjs http://localhost:8080 get books -f category=novela-negra -s -price
-# o, enlazado como binario (npm link en esta carpeta):
+npx restep-cli http://localhost:8080 get books -f category=novela-negra -s -price
+# o, instalado (npm install -g restep-cli), con su orden `restep`:
 restep http://localhost:8080 get books -f category=novela-negra -s -price
 ```
 
