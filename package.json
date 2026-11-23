@@ -3,6 +3,10 @@
   "version": "0.2.0",
   "description": "CLI genérica para cualquier API Restep 1, guiada por su documento de descubrimiento",
   "license": "MIT",
+  "files": [
+    "restep.mjs",
+    "README.md"
+  ],
   "type": "module",
   "bin": {
     "restep": "restep.mjs"
