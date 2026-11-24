@@ -1,7 +1,7 @@
 {
   "name": "restep-cli",
   "version": "0.2.0",
-  "description": "CLI genérica para cualquier API Restep 1, guiada por su documento de descubrimiento",
+  "description": "Generic CLI for any Restep 1 API, driven by its discovery document",
   "license": "MIT",
   "files": [
     "restep.mjs",

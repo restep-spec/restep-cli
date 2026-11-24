@@ -1,155 +1,158 @@
 # restep (CLI)
 
-CLI genérica para cualquier API [Restep 1](https://restep.wubytes.com/es/1/), al estilo de
-httpie pero sabiendo de antemano qué ofrece la API: lee su documento de descubrimiento (§4.2)
-y valida colecciones, filtros, orden, campos y cuerpos antes de enviar nada. Un solo archivo,
-Node 18+, sin dependencias.
+Generic CLI for any [Restep 1](https://restep.wubytes.com/1/) API, in the style of httpie but
+knowing up front what the API offers: it reads the discovery document (§4.2) and validates
+collections, filters, sort, fields and bodies before sending anything. A single file, Node 18+,
+no dependencies.
 
 ```bash
 npx restep-cli http://localhost:8080 get books -f category=novela-negra -s -price
-# o, instalado (npm install -g restep-cli), con su orden `restep`:
+# or, installed (npm install -g restep-cli), with its `restep` command:
 restep http://localhost:8080 get books -f category=novela-negra -s -price
 ```
 
-## Órdenes
+## Commands
 
-| Orden | Petición |
+| Command | Request |
 |---|---|
-| `restep <url> describe [colección\|recurso]` | `GET` de la raíz. Sin nombre, versión, perfiles, extensiones, colecciones y recursos sueltos; con una colección, filtros (tipo, operadores, valores), orden, página, campos, obligatorios y valores por defecto al crear (§4.3), quién elige el `id` (`id_from`), `collations`, el padre de una subcolección, mapas de idioma, relaciones, heredados y acciones |
-| `restep <url> get <colección>` | `GET` de la colección, una página |
-| `restep <url> get <colección> <id>` | `GET` del elemento |
-| `restep <url> get <recurso>` | `GET` de un recurso suelto (§5.9), como `/me`; admite `--fields` |
-| `restep <url> update <recurso> --data …` | `PATCH` de un recurso suelto, sin id |
-| `restep <url> create <colección> --data …` | `POST` con `Idempotency-Key` aleatoria si la API anuncia `writes` |
-| `restep <url> update <colección> <id> --data …` | `PATCH` con `application/merge-patch+json` |
-| `restep <url> delete <colección> <id>` | `DELETE` |
-| `restep <url> action <colección> [<id>] <nombre>` | `POST /colección/id:nombre` o `/colección:nombre`; `GET` si la acción lo declara (§11.1) |
-| `restep completion zsh\|bash` | script de autocompletado |
+| `restep <url> describe [collection\|resource]` | `GET` of the root. Without a name: version, profiles, extensions, collections and singletons; with a collection: filters (type, operators, values), sort, page, fields, required fields and defaults on create (§4.3), who picks the `id` (`id_from`), `collations`, the parent of a subcollection, language maps, relations, inherited fields and actions |
+| `restep <url> get <collection>` | `GET` of the collection, one page |
+| `restep <url> get <collection> <id>` | `GET` of the item |
+| `restep <url> get <resource>` | `GET` of a singleton (§5.9), such as `/me`; accepts `--fields` |
+| `restep <url> update <resource> --data …` | `PATCH` of a singleton, no id |
+| `restep <url> create <collection> --data …` | `POST` with a random `Idempotency-Key` if the API announces `writes` |
+| `restep <url> update <collection> <id> --data …` | `PATCH` with `application/merge-patch+json` |
+| `restep <url> delete <collection> <id>` | `DELETE` |
+| `restep <url> action <collection> [<id>] <name>` | `POST /collection/id:name` or `/collection:name`; `GET` if the action declares it (§11.1) |
+| `restep completion zsh\|bash` | completion script |
 
-Sin orden, `restep <url>` equivale a `describe`.
+With no command, `restep <url>` is the same as `describe`.
 
-### Consulta
+### Querying
 
-- `-f, --filter` (repetible): `campo=valor` (es `filter[campo]`), `campo[op]=valor`, o los atajos
-  `campo!=v`, `campo<v`, `campo<=v`, `campo>v`, `campo>=v`. `in` va con comas:
-  `-f 'category[in]=poesia,ensayo'`. Las traducciones, como el descubrimiento las declara:
-  `-f name.es-mx=Goma`. Un filtro con nombre (§6.1) va sin operador: `-f featured` si es un
-  interruptor o `-f search=niebla` si lleva valor; `describe` los lista con su descripción.
-- `-s, --sort -rating,title`, `--fields title,price` (también en el `get` de un elemento),
+- `-f, --filter` (repeatable): `field=value` (that is `filter[field]`), `field[op]=value`, or the
+  shortcuts `field!=v`, `field<v`, `field<=v`, `field>v`, `field>=v`. `in` takes commas:
+  `-f 'category[in]=poesia,ensayo'`. Translations, as discovery declares them:
+  `-f name.es-mx=Goma`. A named filter (§6.1) takes no operator: `-f featured` if it is a
+  switch, or `-f search=niebla` if it takes a value; `describe` lists them with their description.
+- `-s, --sort -rating,title`, `--fields title,price` (also on an item `get`),
   `-n, --limit N`.
-- `-i, --include author,category.parent` (perfil `relations`, §9), en la colección y en el
-  elemento: cada tramo es una relación declarada con `"include": true`, sin pasar de
-  `include_depth` (1 si no lo declara). Una relación a varias colecciones (`to` como lista) solo
-  puede ir al final del camino. En un recurso suelto no se admite (§5.9).
-- `--all` sigue `next` tal cual hasta `null` (§5.2); con `--limit` fija el tamaño de cada página.
-  En `ndjson` escribe cada página según llega.
-- `--count` imprime solo el total (pide `count=true` y `limit=1`); con `-o json`,
-  `{"total": N}` y `total_estimated` si el total es aproximado.
-- `-o, --format json|ndjson|csv|table`. Por defecto, `table` para listas en una terminal y
-  `json` en lo demás (y siempre que la salida va a una tubería). `csv` y `table` ponen una
-  columna por campo, sin los miembros que empiezan por `_`; los objetos van como JSON.
+- `-i, --include author,category.parent` (`relations` profile, §9), on the collection and on the
+  item: each step is a relation declared with `"include": true`, no deeper than `include_depth`
+  (1 if not declared). A relation to several collections (`to` as a list) can only come last in
+  the path. Not allowed on a singleton (§5.9).
+- `--all` follows `next` as is until `null` (§5.2); with `--limit` it sets the size of each page.
+  With `ndjson` it writes each page as it arrives.
+- `--count` prints only the total (it asks for `count=true` and `limit=1`); with `-o json`,
+  `{"total": N}` plus `total_estimated` if the total is approximate.
+- `-o, --format json|ndjson|csv|table`. By default, `table` for lists in a terminal and `json`
+  everywhere else (and whenever output goes to a pipe). `csv` and `table` put one column per
+  field, without members that start with `_`; objects go in as JSON.
 
-### Escritura
+### Writing
 
-- `-d, --data '{...}'`, `--data @archivo.json` o `--data -` (entrada estándar).
-- `create` y las acciones no idempotentes llevan `Idempotency-Key` aleatoria (una cadena de
-  Structured Fields, §7.1). `--idempotency-key clave` usa la tuya: repetir la orden con la misma
-  clave no duplica, y la CLI avisa en stderr de que la respuesta es una repetición.
-- `--if-match <etag>` (con o sin comillas). `--safe` hace antes un `GET` del elemento y escribe
-  con `If-Match` con su `_etag` o, si no lo trae, su cabecera `ETag` (§7.2).
-- `--minimal` envía `Prefer: return=minimal`; si la respuesta llega sin cuerpo, se muestran
-  `status`, `location` y `etag`.
-- `--retry N` reintenta errores de red, `429`, `502`, `503` y `504` (y `409` con clave, una
-  petición igual aún en curso), respetando `Retry-After`. Solo en lecturas, `DELETE` y
-  peticiones con `Idempotency-Key`, que son las que se pueden repetir sin duplicar.
+- `-d, --data '{...}'`, `--data @file.json` or `--data -` (standard input).
+- `create` and non-idempotent actions carry a random `Idempotency-Key` (a Structured Fields
+  string, §7.1). `--idempotency-key key` uses yours: repeating the command with the same key
+  does not duplicate, and the CLI warns on stderr that the response is a replay.
+- `--if-match <etag>` (with or without quotes). `--safe` first does a `GET` of the item and writes
+  with `If-Match` set to its `_etag` or, if it has none, its `ETag` header (§7.2).
+- `--minimal` sends `Prefer: return=minimal`; if the response has no body, it shows `status`,
+  `location` and `etag`.
+- `--retry N` retries network errors, `429`, `502`, `503` and `504` (and `409` with a key: an
+  identical request still in progress), honouring `Retry-After`. Only on reads, `DELETE` and
+  requests with `Idempotency-Key`, which are the ones that can be repeated without duplicating.
 
-### Validación antes de enviar
+### Validation before sending
 
-Con el descubrimiento en la mano, la CLI rechaza en local (código de salida 3), con
-sugerencias «¿quisiste decir…?»:
+With discovery in hand, the CLI rejects locally (exit code 3), with «¿quisiste decir…?»
+("did you mean…?") suggestions:
 
-- una colección, filtro, operador, clave de orden, campo de `--fields` o acción que no existe;
-- un valor que no encaja con el tipo del filtro (`integer`, `number`, `decimal`, `boolean`,
-  `date`, `datetime`, `duration`, `enum` con sus `values`), `null` sin `true`/`false`, `in`
-  vacío o el mismo filtro dos veces;
-- `--limit` fuera de `max_limit`, `--count` sin `count` declarado, filtros sin el perfil `query`;
-- un método que `methods` o `item_methods` no declaran;
-- un cuerpo que no cumple `schemas.create`, `schemas.update` o el `input` de la acción, cuando
-  vienen incrustados (§4.3). El validador cubre lo habitual de JSON Schema: `type`, `enum`,
+- a collection, filter, operator, sort key, `--fields` field or action that does not exist;
+- a value that does not fit the filter type (`integer`, `number`, `decimal`, `boolean`, `date`,
+  `datetime`, `duration`, `enum` with its `values`), `null` without `true`/`false`, an empty
+  `in`, or the same filter twice;
+- `--limit` beyond `max_limit`, `--count` without `count` declared, filters without the `query`
+  profile;
+- a method that `methods` or `item_methods` do not declare;
+- a body that does not satisfy `schemas.create`, `schemas.update` or the action's `input`, when
+  they are embedded (§4.3). The validator covers the usual JSON Schema: `type`, `enum`,
   `pattern`, `required`, `properties`, `patternProperties`, `additionalProperties`,
-  `propertyNames`, `anyOf`, `oneOf`, `items`, `minimum`, `maximum` y `maxLength`.
+  `propertyNames`, `anyOf`, `oneOf`, `items`, `minimum`, `maximum` and `maxLength`.
 
-`--raw` se salta todo eso y envía igual (y, si la colección no está en el descubrimiento, usa
-`/<colección>`). Si el rechazo se basó en el descubrimiento de la caché, la CLI lo vuelve a
-pedir antes de rendirse, por si la API ha cambiado.
+`--raw` skips all of that and sends anyway (and, if the collection is not in discovery, uses
+`/<collection>`). If the rejection was based on the cached discovery, the CLI fetches it again
+before giving up, in case the API has changed.
 
-### Errores y códigos de salida
+### Errors and exit codes
 
-Los `problem+json` (§5.4) se muestran legibles en stderr: estado, `code`, `title`, `detail`,
-`parameter`, `reason` y cada entrada de `errors` con su puntero. Añade pistas: los filtros u
-orden que sí ofrece la colección ante `unsupported_parameter` (y que no sirve reintentar), el
-campo propio ante un `read_only` sobre un valor heredado (§11.6), `--safe` ante `412`, cómo pasar
-el token y la URL de los metadatos OAuth ante `401`. Con `-o json` el problema sale además tal
-cual en stdout.
+`problem+json` responses (§5.4) are shown readably on stderr: status, `code`, `title`, `detail`,
+`parameter`, `reason` and each `errors` entry with its pointer. It adds hints: the filters or
+sort keys the collection does offer on `unsupported_parameter` (and that retrying is pointless),
+the own field on a `read_only` over an inherited value (§11.6), `--safe` on `412`, how to pass
+the token and the OAuth metadata URL on `401`. With `-o json` the problem also goes to stdout
+as is.
 
-| Código | Cuándo |
+| Code | When |
 |---|---|
-| 0 | bien |
-| 1 | otro error (respuesta que no es Restep, bucle en `next`…) |
-| 2 | uso incorrecto: argumentos, JSON mal formado, alias inexistente |
-| 3 | rechazado en local contra el descubrimiento |
-| 4 | error de red |
+| 0 | success |
+| 1 | other error (a response that is not Restep, a loop in `next`…) |
+| 2 | wrong usage: arguments, malformed JSON, unknown alias |
+| 3 | rejected locally against discovery |
+| 4 | network error |
 | 5 | `400` |
 | 6 | `401`, `403` |
 | 7 | `404`, `410` |
 | 8 | `409`, `412`, `428` |
 | 9 | `422` |
-| 10 | otro `4xx` |
+| 10 | other `4xx` |
 | 11 | `5xx` |
 
-### Depurar
+### Debugging
 
-- `-v, --verbose` escribe en stderr cada petición y respuesta con sus cabeceras (el token como
-  `Bearer ****`), también la del descubrimiento cuando no sale de la caché.
-- `--curl` imprime el `curl` equivalente sin enviarlo. El token nunca se imprime: el curl usa
-  `"Authorization: Bearer $RESTEP_TOKEN"`. Con `--safe` imprime el `GET` y el `PATCH` con un
-  hueco para el ETag.
+- `-v, --verbose` writes each request and response with their headers to stderr (the token as
+  `Bearer ****`), including the discovery one when it does not come from the cache.
+- `--curl` prints the equivalent `curl` without sending it. The token is never printed: the curl
+  uses `"Authorization: Bearer $RESTEP_TOKEN"`. With `--safe` it prints the `GET` and the `PATCH`
+  with a placeholder for the ETag.
 
-### Borrador 6: lo que hace como cliente (§12.2)
+### Draft 6: what it does as a client (§12.2)
 
-- **Versión (§1.1).** Acepta `restep` con sufijo (`1.0-draft.6`, `1.0-rc.1`) y lo muestra en
-  `describe`. Un descubrimiento cuyo `restep` no sigue la gramática o cuya versión mayor no es 1
-  no es Restep 1: la CLI se para con código 1, también con `--raw` o `--curl`, en vez de suponer
-  solo `core`.
-- **Partes experimentales (§1.2).** La única que usa es `inherit` (la pista del campo propio y
-  los heredados de `describe`), y solo si la API anuncia la extensión y declara
-  `"restep": "1.0-draft.6"`, el texto que conoce. Con otra versión, `describe` avisa y no la usa.
-  `sync`, `batch`, `filter-expr` y `query-method` no los usa nunca.
-- **Valores desconocidos (§4.2).** Un filtro o un filtro con nombre con un `type` que no conoce,
-  un operador fuera de la lista de §6.1 y una acción con un `on` o un `method` que no conoce se
-  tratan como no declarados: `describe` los señala, la validación los rechaza y el autocompletado
-  no los ofrece.
-- **Recursos sueltos (§5.9).** `get` y `update` sin id; `create`, `delete` y `action` se rechazan
-  en local. Un recurso suelto con plantilla en `path` o con `parent` se ignora.
-- **`id_from` (§5.1).** Con un valor que no conoce, no manda `id` en `create` (ni con `--raw`).
-  Además avisa en local de un `id` donde lo asigna el servidor y de su falta con `"client"`.
-- **`idempotency.anonymous: false` (§7.1).** Sin credenciales (ni token ni `-H Authorization`
-  o `Cookie`) no pone `Idempotency-Key` aleatoria; `--idempotency-key` se rechaza en local.
-- **`Content-Type`** `application/json` en `create` y acciones `POST`, y
-  `application/merge-patch+json` en `update` (§3, §5.1). Un `+` literal en un valor va como
-  `%2B` (§5.2): la CLI construye la consulta con `URLSearchParams`.
-- **Enlaces (§3).** No sigue un `next` ni un `service-desc` cuyo esquema no sea `https` ni el de
-  la raíz. Las credenciales, también las que se pasan con `-H` (`Authorization`, `Cookie`,
-  `Proxy-Authorization`, `DPoP`), solo van al origen de la API (§4.3).
+- **Version (§1.1).** Accepts `restep` with a suffix (`1.0-draft.6`, `1.0-rc.1`) and shows it in
+  `describe`. A discovery whose `restep` does not follow the grammar or whose major version is
+  not 1 is not Restep 1: the CLI stops with code 1, also with `--raw` or `--curl`, instead of
+  assuming plain `core`.
+- **Experimental parts (§1.2).** The only one it uses is `inherit` (the own-field hint and the
+  inherited fields in `describe`), and only if the API announces the extension and declares
+  `"restep": "1.0-draft.6"`, the text it knows. With another version, `describe` warns and does
+  not use it. It never uses `sync`, `batch`, `filter-expr` or `query-method`.
+- **Unknown values (§4.2).** A filter or named filter with a `type` it does not know, an operator
+  outside the list in §6.1, and an action with an `on` or `method` it does not know are treated
+  as undeclared: `describe` flags them, validation rejects them and completion does not offer
+  them.
+- **Singletons (§5.9).** `get` and `update` without an id; `create`, `delete` and `action` are
+  rejected locally. A singleton with a template in `path` or with `parent` is ignored.
+- **`id_from` (§5.1).** With a value it does not know, it does not send `id` on `create` (not
+  even with `--raw`). It also warns locally about an `id` where the server assigns it, and about
+  a missing one with `"client"`.
+- **`idempotency.anonymous: false` (§7.1).** Without credentials (no token, no `-H Authorization`
+  or `Cookie`) it does not add a random `Idempotency-Key`; `--idempotency-key` is rejected
+  locally.
+- **`Content-Type`** `application/json` on `create` and `POST` actions, and
+  `application/merge-patch+json` on `update` (§3, §5.1). A literal `+` in a value goes as `%2B`
+  (§5.2): the CLI builds the query with `URLSearchParams`.
+- **Links (§3).** It does not follow a `next` or a `service-desc` whose scheme is neither `https`
+  nor the root's. Credentials, including those passed with `-H` (`Authorization`, `Cookie`,
+  `Proxy-Authorization`, `DPoP`), only go to the API's origin (§4.3).
 
-## Perfiles
+## Profiles
 
-Por orden de preferencia, la API sale del primer argumento (una URL o `@alias`), de
-`RESTEP_URL` o del alias `default` del archivo de configuración. El token, de `--token`, del
-alias (`token` o `token_env`, el nombre de una variable de entorno) o de `RESTEP_TOKEN`. El
-idioma (`Accept-Language`, §5.6), de `--language`, del alias o de `RESTEP_LANGUAGE`.
+In order of preference, the API comes from the first argument (a URL or `@alias`), from
+`RESTEP_URL` or from the `default` alias in the config file. The token, from `--token`, from the
+alias (`token` or `token_env`, the name of an environment variable) or from `RESTEP_TOKEN`. The
+language (`Accept-Language`, §5.6), from `--language`, from the alias or from `RESTEP_LANGUAGE`.
 
-`~/.config/restep/config.json` (o `$XDG_CONFIG_HOME/restep/config.json`, o `RESTEP_CONFIG`):
+`~/.config/restep/config.json` (or `$XDG_CONFIG_HOME/restep/config.json`, or `RESTEP_CONFIG`):
 
 ```json
 {
@@ -165,86 +168,85 @@ idioma (`Accept-Language`, §5.6), de `--language`, del alias o de `RESTEP_LANGU
 restep @tienda get pedidos -f estado=pagado
 ```
 
-Las credenciales solo van al origen de la API (§4.3): un `next` u otro enlace a otro origen se
-pide sin ellas.
+Credentials only go to the API's origin (§4.3): a `next` or any other link to another origin is
+fetched without them.
 
-## Autocompletado
-
-```bash
-eval "$(restep completion zsh)"    # en ~/.zshrc, después de compinit
-eval "$(restep completion bash)"   # en ~/.bashrc
-```
-
-Necesita `restep` en el `PATH` (`npm link` en esta carpeta, o un alias). Sugiere órdenes,
-alias, colecciones, filtros (`campo=` y `campo[op]=`), valores de los `enum` (también dentro de
-un `in`), claves de orden con y sin `-`, campos de `--fields`, formatos, opciones y acciones.
-Lo lee del descubrimiento con una caché local corta.
-
-## Caché del descubrimiento
-
-En `~/.cache/restep/` (o `$XDG_CACHE_HOME/restep/`, o `RESTEP_CACHE_DIR`), un archivo por API,
-idioma y token (del token solo se guarda la huella). Las órdenes respetan el `max-age` de la
-respuesta, con 300 segundos como máximo, y revalidan con `If-None-Match`; una respuesta
-`no-store` no se guarda. El autocompletado usa la copia guardada hasta 300 segundos aunque haya
-caducado, y si tiene que pedirla espera como mucho 2 segundos. `--no-cache` la vuelve a pedir.
-
-## Pruebas
+## Completion
 
 ```bash
-node tools/restep-cli/test.mjs     # desde restep/
+eval "$(restep completion zsh)"    # in ~/.zshrc, after compinit
+eval "$(restep completion bash)"   # in ~/.bashrc
 ```
 
-Arrancan el servidor de referencia en 8850 y en 8851 (con `RESTEP_TOKEN`). Contra él se prueban
-la subcolección `reviews` con `--parent` (404 sin libro, borrada con él), `--include` con
-profundidad 2, la relación `highlight` con `href` y la polimórfica `showcase` con `type`, y las
-acciones `low_stock` (`GET` de colección), `restock` (`POST` de elemento con `input` validado en
-local), `find_or_create` e `inherit_tax` (idempotentes). Un servidor simulado en 8852 tiene lo
-que la referencia no tiene o no provoca: acciones con eco de lo enviado, una API sin la
-extensión actions (`/sinext/`), el
-descubrimiento enlazado con `service-desc`, un `503` para los reintentos y, bajo otras raíces
-(`/d6/`, `/d7/`, `/v2/`, `/rara/`, `/xo/`), descubrimientos del borrador 6 con valores
-desconocidos, `id_from` desconocido, `anonymous: false`, recursos sueltos reservados, otra
-versión mayor, un `restep` mal formado y un `service-desc` a otro origen. El 8859 se usa como
-puerto sin nadie, para el error de red.
+Needs `restep` on the `PATH` (`npm link` in this folder, or an alias). It suggests commands,
+aliases, collections, filters (`field=` and `field[op]=`), `enum` values (also inside an `in`),
+sort keys with and without `-`, `--fields` fields, formats, options and actions. It reads them
+from discovery with a short local cache.
 
-## Límites
+## Discovery cache
 
-- De `relations` solo lee (`--include`): no construye objetos de relación al escribir. No cubre
-  `sync`, `batch`, `filter-expr` ni `query-method`; `filter=` como expresión no tiene opción
-  propia (con `--raw` se puede mandar a mano).
-- Solo valida contra esquemas incrustados en el descubrimiento; un esquema enlazado no se
-  descarga. `--fields` solo se comprueba si hay un `schemas.item` incrustado.
-- `readOnly` no se valida (en Restep es solo una anotación, §4.3): escribir el campo efectivo
-  de un valor heredado lo rechaza el servidor, y la CLI da la pista del campo propio.
-- El autocompletado no sugiere ids de elementos.
-- No hay flujo OAuth: el token se consigue fuera y se pasa con `--token` o `RESTEP_TOKEN`.
-- Del borrador 6 no implementa: crear o enlazar relaciones (no construye objetos de relación,
-  así que tampoco el `href` de un elemento de subcolección, §5.1); `deprecations` solo se cuentan
-  en `describe` (no se muestran su `kind`, `announced` ni `sunset`, ni se avisa con la cabecera
-  `Deprecation`); `collations` y `parent` solo se muestran; los avisos con un `kind` desconocido
-  se cuentan igual; no lee `reasons` (un `reason` se muestra tal cual y el código de salida sale
-  del estado, como pide §5.4); no reintenta un `PATCH` aunque §5.7 lo permita; no valida el
-  esquema `update` de un recurso suelto si viene enlazado; el `_inherited` de un elemento se
-  muestra tal cual, sin interpretar `from`.
+In `~/.cache/restep/` (or `$XDG_CACHE_HOME/restep/`, or `RESTEP_CACHE_DIR`), one file per API,
+language and token (only the token's fingerprint is stored). Commands honour the response's
+`max-age`, capped at 300 seconds, and revalidate with `If-None-Match`; a `no-store` response is
+not stored. Completion uses the stored copy for up to 300 seconds even if it has expired, and if
+it has to fetch it, waits at most 2 seconds. `--no-cache` fetches it again.
 
-## Dudas sobre la spec
+## Tests
 
-- **Cuerpo de una acción sin `input`.** Resuelto en el borrador 6 (§11.1: un cuerpo vacío vale
-  `{}`). La CLI sigue enviando `{}`.
-- **Idempotency-Key en acciones idempotentes.** Resuelto en el borrador 6 (§11.1: no se rechaza
-  una clave bien formada). La CLI sigue sin enviarla en esas.
-- **Qué campos tiene una colección.** El descubrimiento no lista los campos de un elemento
-  salvo a través de `schemas.item`, que es opcional (§4.3). Sin él, un cliente no puede
-  comprobar `fields` antes de enviar ni ofrecer autocompletado de campos.
-- **Caché del descubrimiento.** Resuelto en el borrador 6 (§4.2: se guarda lo que permita su
-  `Cache-Control` y se vuelve a pedir ante un `unsupported_parameter` o un `405`). La CLI respeta
-  `max-age` (300 s como mucho), revalida con ETag y, ante un rechazo local con la copia
-  guardada, la vuelve a pedir; ante un error del servidor no la vuelve a pedir.
+```bash
+node tools/restep-cli/test.mjs     # from restep/
+```
 
-## Código y avisos
+They start the reference server on 8850 and on 8851 (with `RESTEP_TOKEN`). Against it they test
+the `reviews` subcollection with `--parent` (404 without its book, deleted along with it),
+`--include` with depth 2, the `highlight` relation with `href` and the polymorphic `showcase`
+with `type`, and the actions `low_stock` (collection `GET`), `restock` (item `POST` with `input`
+validated locally), `find_or_create` and `inherit_tax` (idempotent). A mock server on 8852 has
+what the reference lacks or cannot trigger: actions that echo what was sent, an API without the
+actions extension (`/sinext/`), discovery linked through `service-desc`, a `503` for retries and,
+under other roots (`/d6/`, `/d7/`, `/v2/`, `/rara/`, `/xo/`), draft 6 discoveries with unknown
+values, unknown `id_from`, `anonymous: false`, reserved singletons, another major version, a
+malformed `restep` and a `service-desc` to another origin. Port 8859 is used as a port with
+nobody listening, for the network error.
 
-Código y avisos: <https://github.com/restep-spec/restep-cli>. Ese repositorio se genera desde la web de
-Restep, donde la herramienta se desarrolla junto a la [especificación](https://restep.wubytes.com/1/) y el servidor de
-referencia: `vendor/` y `schema/` son copias de la web para que las pruebas funcionen solas.
+## Limits
 
-Licencia MIT.
+- Of `relations` it only reads (`--include`): it does not build relation objects when writing.
+  It does not cover `sync`, `batch`, `filter-expr` or `query-method`; `filter=` as an expression
+  has no option of its own (with `--raw` it can be sent by hand).
+- It only validates against schemas embedded in discovery; a linked schema is not downloaded.
+  `--fields` is only checked if there is an embedded `schemas.item`.
+- `readOnly` is not validated (in Restep it is only an annotation, §4.3): writing the effective
+  field of an inherited value is rejected by the server, and the CLI gives the own-field hint.
+- Completion does not suggest item ids.
+- There is no OAuth flow: get the token elsewhere and pass it with `--token` or `RESTEP_TOKEN`.
+- Not implemented from draft 6: creating or linking relations (it does not build relation
+  objects, so not the `href` of a subcollection item either, §5.1); `deprecations` are only
+  counted in `describe` (their `kind`, `announced` and `sunset` are not shown, and there is no
+  warning for the `Deprecation` header); `collations` and `parent` are only shown; warnings with
+  an unknown `kind` are counted all the same; it does not read `reasons` (a `reason` is shown as
+  is and the exit code comes from the status, as §5.4 requires); it does not retry a `PATCH`
+  even though §5.7 allows it; it does not validate a singleton's `update` schema if it is
+  linked; an item's `_inherited` is shown as is, without interpreting `from`.
+
+## Open questions about the spec
+
+- **Body of an action without `input`.** Resolved in draft 6 (§11.1: an empty body counts as
+  `{}`). The CLI still sends `{}`.
+- **Idempotency-Key on idempotent actions.** Resolved in draft 6 (§11.1: a well-formed key is not
+  rejected). The CLI still does not send one on them.
+- **Which fields a collection has.** Discovery does not list an item's fields except through
+  `schemas.item`, which is optional (§4.3). Without it, a client cannot check `fields` before
+  sending nor offer field completion.
+- **Discovery cache.** Resolved in draft 6 (§4.2: store it as far as its `Cache-Control` allows
+  and fetch it again on an `unsupported_parameter` or a `405`). The CLI honours `max-age` (300 s
+  at most), revalidates with ETag and, on a local rejection with the stored copy, fetches it
+  again; on a server error it does not.
+
+## Code and issues
+
+Code and issues: <https://github.com/restep-spec/restep-cli>. That repository is generated from the Restep
+site, where the tool is developed alongside the [specification](https://restep.wubytes.com/1/) and the reference
+server: `vendor/` and `schema/` are copies from the site so the tests run on their own.
+
+MIT licensed.
