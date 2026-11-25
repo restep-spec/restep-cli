@@ -1,6 +1,6 @@
 # restep (CLI)
 
-Generic CLI for any [Restep 1](https://restep.wubytes.com/1/) API, in the style of httpie but
+Generic CLI for any [Restep 1](https://w3id.org/restep/1/) API, in the style of httpie but
 knowing up front what the API offers: it reads the discovery document (§4.2) and validates
 collections, filters, sort, fields and bodies before sending anything. A single file, Node 18+,
 no dependencies.
@@ -65,13 +65,14 @@ With no command, `restep <url>` is the same as `describe`.
 
 ### Validation before sending
 
-With discovery in hand, the CLI rejects locally (exit code 3), with «¿quisiste decir…?»
-("did you mean…?") suggestions:
+With discovery in hand, the CLI rejects locally (exit code 3), with "did you mean…?"
+suggestions:
 
 - a collection, filter, operator, sort key, `--fields` field or action that does not exist;
 - a value that does not fit the filter type (`integer`, `number`, `decimal`, `boolean`, `date`,
-  `datetime`, `duration`, `enum` with its `values`), `null` without `true`/`false`, an empty
-  `in`, or the same filter twice;
+  `datetime`, `duration`, `enum` with its `values`; an `integer` operand is valid when it has no
+  fractional part, so `20.0` is `20` and `20.5` is rejected, §6.1), `null` without `true`/`false`,
+  an empty `in`, or the same filter twice;
 - `--limit` beyond `max_limit`, `--count` without `count` declared, filters without the `query`
   profile;
 - a method that `methods` or `item_methods` do not declare;
@@ -116,22 +117,82 @@ as is.
   uses `"Authorization: Bearer $RESTEP_TOKEN"`. With `--safe` it prints the `GET` and the `PATCH`
   with a placeholder for the ETag.
 
-### Draft 6: what it does as a client (§12.2)
+### Draft 7: what it does as a client (§12.2)
 
-- **Version (§1.1).** Accepts `restep` with a suffix (`1.0-draft.6`, `1.0-rc.1`) and shows it in
+- **Version (§1.1).** Accepts `restep` with a suffix (`1.0-draft.7`, `1.0-rc.1`, case-sensitive) and shows it in
   `describe`. A discovery whose `restep` does not follow the grammar or whose major version is
   not 1 is not Restep 1: the CLI stops with code 1, also with `--raw` or `--curl`, instead of
   assuming plain `core`.
 - **Experimental parts (§1.2).** The only one it uses is `inherit` (the own-field hint and the
   inherited fields in `describe`), and only if the API announces the extension and declares
-  `"restep": "1.0-draft.6"`, the text it knows. With another version, `describe` warns and does
+  `"restep": "1.0-draft.7"`, the text it knows. With another version, `describe` warns and does
   not use it. It never uses `sync`, `batch`, `filter-expr` or `query-method`.
-- **Unknown values (§4.2).** A filter or named filter with a `type` it does not know, an operator
-  outside the list in §6.1, and an action with an `on` or `method` it does not know are treated
-  as undeclared: `describe` flags them, validation rejects them and completion does not offer
-  them.
-- **Singletons (§5.9).** `get` and `update` without an id; `create`, `delete` and `action` are
-  rejected locally. A singleton with a template in `path` or with `parent` is ignored.
+- **Discovery (§4.2).** Only a `2xx` without `restep`, or a `404`, means plain `core`; any other
+  error stops the CLI. Of several `service-desc` links it uses the first that is a discovery
+  document of Restep 1.
+- **Unknown values (§4.2).** A filter or named filter with a `type` it does not know, a filter
+  with a `quantifier` other than `some`, an operator outside the list in §6.1 (only that
+  operator), an inheritance with a member it does not know, and an action with an `on` or
+  `method` it does not know are treated as undeclared: `describe` flags them, validation rejects
+  them and completion does not offer them. An `effects` value it does not know counts as all
+  three.
+- **Filters (§6.1).** The operators `nin`, `prefix` and `contains`, and the types `localdatetime`
+  and `timezone`; durations follow §3 (a fraction of up to nine digits in the seconds, letters in
+  either case, no years or months in a filter). A list without a required filter is rejected
+  locally. `null` as the only operator on a to-many relationship or a list field
+  (`-f reviews[null]=true`), declared with `"quantifier": "some"` or without it, is accepted and
+  offered like any other filter; under a `quantifier` it tests the whole group (alone, an empty,
+  absent or `null` one; with `in` or another filter on the group, `true` means that no visible
+  element matches). Operands of `integer` and `number` filters and `-P` params follow the number
+  grammar of RFC 8259 with exponent (`2e1` is `20`; `+20`, `.5`, `020`, `0x14` are rejected), and
+  a `localdatetime` never has a leap second (`:60`). `-f name=false` turns a default filter off, and `--all` without `-f` is the request for
+  a full copy (§5.2): it turns off every default filter and says so on stderr.
+- **Collections without `GET` (§4.3).** `get` of the collection is rejected locally, and
+  `describe` says it cannot be listed.
+- **Singletons (§5.9).** `get`, `update` and `action <resource> <name>` without an id;
+  `create` and `delete` are rejected locally. One under an item (a template with `parent`) takes
+  the parent ids with `--parent`. One whose `path` is a template without `parent`, or whose
+  `parent` names nothing in the document, is ignored.
+- **Localized fields (§3, §5.6).** It sends them as given: the server decides (§5.1 lets a write
+  carry the value the item would have; a `read_only` error gets a hint naming its language map).
+  A response with localized fields shows its `Content-Language` on stderr.
+  `describe` shows `default_language`.
+- **Upload (§5.1).** `create <collection> --file <path>` sends the bytes with their
+  `Content-Type` (`--type`, or from the extension) and the name in `Content-Disposition`
+  (RFC 6266, `filename*` when it is not ASCII), after checking `media_types` and `max_size`.
+  `schemas.create` announces creation from JSON: in a collection with `upload` and without
+  `create`, `create --data` is rejected locally (it takes only files). With both, `--data` always
+  creates an item, and a JSON file (`application/json`) goes as the `file` part of
+  `multipart/form-data` (RFC 7578; `-F` with `--curl`), where the collection declares
+  `"multipart": true`; without it, it is rejected locally. `describe` says which. Only
+  `application/json` itself selects creation: a `+json` type (`--type application/ld+json`) is a
+  file like any other, and in a collection that only takes uploads a JSON file that `media_types`
+  admits, also through `application/*` or `*/*`, goes as its bytes. A file of type
+  `multipart/form-data` goes only as the `file` part, and never to a collection without
+  `"multipart": true`, not even with `--raw`. The `file` part always carries the file's name as
+  `filename`.
+- **One `null` per group (§6.1).** Two `null` filters on the same to-many relationship or list
+  field, its own or that of a path through it (`-f 'reviews[null]=true' -f 'reviews.id[null]=true'`),
+  are rejected locally, even when they agree. Numeric operands go as written (`1e400` included).
+- **`upsert` (§5.1).** A `201` to `update` is reported as created; `--create-only` sends
+  `If-None-Match: *`.
+- **Effects (§4.3, §11.1).** In a terminal (or with `RESTEP_CONFIRM=always`) it asks before an
+  operation with effects: an action, a create, an update or a delete, using `effects`,
+  `method_effects` and `item_method_effects` (an undeclared one counts as all three, a safe action
+  without `effects` as none, an unknown value as all three, also on a safe action, an undeclared
+  `DELETE` as `destroys`). A singleton's `PATCH` uses its `method_effects` (§5.9); undeclared, it
+  counts as all three. `--yes` or `RESTEP_CONFIRM=never` skips it.
+- **Actions (§11.1).** `-P name=value` gives the `params` of a `GET` action, checked against the
+  declaration (undeclared, missing required, type, lists); a `GET` action without `params` takes
+  none (§5.3: any one gives `unsupported_parameter`). `describe` shows params, `output` and
+  effects.
+- **`415` (§5.1).** Its `Accept-Post`, if any, is shown as a hint (a JSON body to a collection
+  that only takes uploads, say).
+- **Retries (§5.7, §5.1).** `--retry` repeats a request with `Idempotency-Key` only within
+  `idempotency.ttl` (24 hours where undeclared) from the first attempt, and a `DELETE` or `PATCH`
+  in a collection with `reusable_ids` only if it carries `If-Match`. Past the ttl it says that
+  whether the first attempt took effect is unknown, to be found out another way before sending it
+  again (§5.7).
 - **`id_from` (§5.1).** With a value it does not know, it does not send `id` on `create` (not
   even with `--raw`). It also warns locally about an `id` where the server assigns it, and about
   a missing one with `"client"`.
@@ -201,12 +262,15 @@ They start the reference server on 8850 and on 8851 (with `RESTEP_TOKEN`). Again
 the `reviews` subcollection with `--parent` (404 without its book, deleted along with it),
 `--include` with depth 2, the `highlight` relation with `href` and the polymorphic `showcase`
 with `type`, and the actions `low_stock` (collection `GET`), `restock` (item `POST` with `input`
-validated locally), `find_or_create` and `inherit_tax` (idempotent). A mock server on 8852 has
+validated locally), `find_or_create` (`201` then `204`) and `inherit_tax` (idempotent), plus
+`payments` (no `GET`), the default filter of `orders` and the child singleton `settings`. A mock server on 8852 has
 what the reference lacks or cannot trigger: actions that echo what was sent, an API without the
 actions extension (`/sinext/`), discovery linked through `service-desc`, a `503` for retries and,
-under other roots (`/d6/`, `/d7/`, `/v2/`, `/rara/`, `/xo/`), draft 6 discoveries with unknown
-values, unknown `id_from`, `anonymous: false`, reserved singletons, another major version, a
-malformed `restep` and a `service-desc` to another origin. Port 8859 is used as a port with
+under other roots (`/d6/`, `/old/`, `/v7/`, `/v2/`, `/rara/`, `/xo/`, `/sd/`, `/e400/`),
+discoveries with unknown values, unknown `id_from`, `anonymous: false`, ignored and child
+singletons, another major version, a malformed `restep`, a `service-desc` to another origin, an
+earlier draft, a discovery error, and the draft 7 items above (filters, default and required
+filters, localized fields, upload, `upsert`, params, effects and the retries). Port 8859 is used as a port with
 nobody listening, for the network error.
 
 ## Limits
@@ -220,7 +284,11 @@ nobody listening, for the network error.
   field of an inherited value is rejected by the server, and the CLI gives the own-field hint.
 - Completion does not suggest item ids.
 - There is no OAuth flow: get the token elsewhere and pass it with `--token` or `RESTEP_TOKEN`.
-- Not implemented from draft 6: creating or linking relations (it does not build relation
+- `multipart/form-data` (`upload.multipart`, §5.1) only for a JSON file in a collection that also
+  creates from JSON, or a file of type `multipart/form-data`; any other file goes as the bytes of
+  the body.
+- It keeps no copies of items, so revalidating after an action (§11.1) does not apply to it.
+- Not implemented from drafts 6 and 7: creating or linking relations (it does not build relation
   objects, so not the `href` of a subcollection item either, §5.1); `deprecations` are only
   counted in `describe` (their `kind`, `announced` and `sunset` are not shown, and there is no
   warning for the `Deprecation` header); `collations` and `parent` are only shown; warnings with
@@ -246,7 +314,7 @@ nobody listening, for the network error.
 ## Code and issues
 
 Code and issues: <https://github.com/restep-spec/restep-cli>. That repository is generated from the Restep
-site, where the tool is developed alongside the [specification](https://restep.wubytes.com/1/) and the reference
+site, where the tool is developed alongside the [specification](https://w3id.org/restep/1/) and the reference
 server: `vendor/` and `schema/` are copies from the site so the tests run on their own.
 
 MIT licensed.
